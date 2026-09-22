@@ -931,6 +931,35 @@ table.log-table tr.clickable:hover {
   margin-bottom: 16px;
 }
 
+.incident-selector-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.incident-selector-wrap label {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+.incident-dropdown {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+  max-width: 340px;
+}
+
+.incident-dropdown:focus {
+  outline: none;
+  border-color: var(--cyan);
+}
+
 @media (max-width: 900px) {
   .grid-4 {
     grid-template-columns: 1fr 1fr;

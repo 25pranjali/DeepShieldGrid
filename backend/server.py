@@ -166,7 +166,7 @@ def compute_shap_values(feature_dict, predicted_class_index):
 def create_incident(source, attack_type, confidence, ground_truth_label,
                      manipulated_fields, feature_dict, predicted_class_index):
     risk_score, risk_level = calculate_risk(attack_type, confidence)
-    timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     conn = get_db()
     cur = conn.cursor()
@@ -205,7 +205,7 @@ def create_incident(source, attack_type, confidence, ground_truth_label,
 # ---------------------------------------------------------------------------
 DATASET = load_clean_dataset()
 DATASET_LEN = len(DATASET)
-print(f"Loaded dataset with {DATASET_LEN} usable rows.")
+print(f"Loaded dataset with {DATASET_LEN} usable rows (interleaved attack stream active).")
 
 simulation_state = {
     "running": False,
@@ -249,7 +249,7 @@ def simulation_loop(interval_seconds):
 
         row = DATASET.iloc[idx]
         feature_dict, result, predicted_class_index = run_prediction_on_row(row)
-        timestamp = datetime.now(timezone.utc).isoformat()
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         manipulated = row["manipulated_fields"] if pd.notna(row["manipulated_fields"]) else None
 
         # Save this reading
@@ -503,6 +503,8 @@ def simulation_start():
         if simulation_state["running"]:
             return jsonify({"error": "Simulation is already running"}), 400
         simulation_state["running"] = True
+        simulation_state["current_index"] = 0          # restart from row 0
+        simulation_state["latest_reading"] = None       # clear stale reading
 
     thread = threading.Thread(target=simulation_loop, args=(interval_seconds,), daemon=True)
     simulation_state["thread"] = thread

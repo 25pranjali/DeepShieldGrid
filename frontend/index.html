@@ -161,9 +161,14 @@
         <div class="page-head">
           <div>
             <h1>Attack Detection</h1>
-            <p id="detectionSubtitle">Select an incident from the Dashboard to see details</p>
+            <p id="detectionSubtitle">Incident details and response actions</p>
           </div>
-          <span class="scope-note">Predicted vs. ground truth</span>
+          <div class="incident-selector-wrap">
+            <label for="detectionIncidentSelect">Incident:</label>
+            <select id="detectionIncidentSelect" class="incident-dropdown" onchange="onSelectDetectionIncident(this.value)">
+              <option value="">Loading incidents...</option>
+            </select>
+          </div>
         </div>
 
         <div id="detectionEmpty" class="loading-msg">No incident selected yet — go to the Dashboard and click a row in
@@ -232,6 +237,12 @@
           <div>
             <h1>Why was this flagged?</h1>
             <p id="shapSubtitle">SHAP feature contributions for the selected incident</p>
+          </div>
+          <div class="incident-selector-wrap">
+            <label for="shapIncidentSelect">Incident:</label>
+            <select id="shapIncidentSelect" class="incident-dropdown" onchange="onSelectShapIncident(this.value)">
+              <option value="">Loading incidents...</option>
+            </select>
           </div>
         </div>
 

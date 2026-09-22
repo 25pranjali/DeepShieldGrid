@@ -50,7 +50,7 @@ async function loginUser() {
     document.getElementById("navWhatIf").hidden = currentRole !== "admin";
 
     updateDashboard();
-    dashboardPollTimer = setInterval(updateDashboard, 4000);
+    dashboardPollTimer = setInterval(updateDashboard, 2000);
   } catch (err) {
     errorBox.textContent = "Unable to connect to the GridSentry backend. Is server.py running?";
     errorBox.classList.add("visible");
@@ -88,7 +88,7 @@ function goToShapForCurrentIncident() {
 // Dashboard
 // ---------------------------------------------------------------------------
 async function updateDashboard() {
-  await Promise.all([loadLatestReading(), loadIncidents(), loadSimulationStatus()]);
+  await Promise.all([loadLatestReading(), loadIncidents(), loadSimulationStatus(), loadIncidentDropdowns()]);
 }
 
 function fmt(value, decimals = 4) {
@@ -212,6 +212,44 @@ async function stopSimulation() {
   } catch (err) {
     // ignore, dashboard poll will surface connection errors
   }
+}
+
+// ---------------------------------------------------------------------------
+// Incident dropdown selectors (Attack Detection + SHAP pages)
+// ---------------------------------------------------------------------------
+async function loadIncidentDropdowns() {
+  try {
+    const res = await fetch(`${API_BASE}/api/incidents`);
+    const incidents = await res.json();
+    if (!Array.isArray(incidents)) return;
+
+    const selDet = document.getElementById("detectionIncidentSelect");
+    const selShap = document.getElementById("shapIncidentSelect");
+    if (!selDet || !selShap) return;
+
+    const makeOptions = (list) => {
+      let html = '<option value="" disabled selected>Select incident…</option>';
+      list.forEach((inc) => {
+        html += `<option value="${inc.id}">#${inc.id} – ${inc.attack_type} (${inc.risk_level})</option>`;
+      });
+      return html;
+    };
+
+    selDet.innerHTML = makeOptions(incidents);
+    selShap.innerHTML = makeOptions(incidents);
+  } catch (err) {
+    // dropdowns stay as-is
+  }
+}
+
+function onSelectDetectionIncident(val) {
+  if (!val) return;
+  openIncident(Number(val));
+}
+
+function onSelectShapIncident(val) {
+  if (!val) return;
+  loadShapExplanation(Number(val));
 }
 
 // ---------------------------------------------------------------------------
