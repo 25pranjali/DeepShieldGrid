@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GridSentry — Smart Grid Attack Detection</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+
+<body>
+
+  <!-- ================= LOGIN ================= -->
+  <div id="login">
+    <div class="login-card">
+      <div class="login-brand"><span class="dot"></span><span>GridSentry</span></div>
+      <h1>Sign in</h1>
+      <p class="sub">Smart grid attack detection prototype — FDI / Normal / TSA classification.</p>
+
+      <div id="loginError" class="login-error"></div>
+
+      <div class="field">
+        <label>Username</label>
+        <input type="text" id="username" value="admin" />
+      </div>
+      <div class="field">
+        <label>Password</label>
+        <input type="password" id="password" value="admin123" />
+      </div>
+      <button class="btn-primary" onclick="loginUser()">Sign in</button>
+      <p class="demo-creds">Demo accounts: admin / admin123 (admin role)<br />operator / operator123 (user role)</p>
+    </div>
+  </div>
+
+  <!-- ================= APP ================= -->
+  <div id="app">
+    <aside class="sidebar">
+      <div class="brand"><span class="dot"></span><span>GridSentry</span></div>
+
+      <button class="nav-item active" onclick="showPage('dashboard', this)">
+        <span class="ic">◧</span> Dashboard
+      </button>
+      <button class="nav-item" onclick="showPage('detection', this)">
+        <span class="ic">⚠</span> Attack Detection
+      </button>
+      <button class="nav-item" onclick="showPage('shap', this)">
+        <span class="ic">◐</span> Explanation (SHAP)
+      </button>
+      <button class="nav-item" id="navWhatIf" onclick="showPage('whatif', this)" hidden>
+        <span class="ic">⚙</span> What-If Simulator
+      </button>
+
+      <div class="sidebar-foot">
+        <span class="role-pill" id="rolePill">Role: —</span><br />
+        <button class="logout-link" onclick="logout()">Sign out</button>
+      </div>
+    </aside>
+
+    <main class="content">
+
+      <!-- PAGE 1: DASHBOARD -->
+      <section class="page active" id="page-dashboard">
+        <div class="page-head">
+          <div>
+            <h1>Monitoring Dashboard</h1>
+            <p>Simulated real-time PMU feed, replayed from the historical dataset</p>
+          </div>
+          <span class="scope-note">Classes: FDI · Normal · TSA</span>
+        </div>
+
+        <div class="sim-controls">
+          <span class="sim-dot" id="simDot"></span>
+          <span class="sim-status-text" id="simStatusText">Simulation stopped</span>
+          <button class="btn-secondary" onclick="startSimulation()">Start simulation</button>
+          <button class="btn-secondary" onclick="stopSimulation()">Stop simulation</button>
+          <button class="btn-secondary" onclick="updateDashboard()">Refresh now</button>
+        </div>
+
+        <div id="dashboardError"></div>
+
+        <div id="statusBanner" class="status-banner normal">
+          <span class="pulse"></span>
+          <div class="txt">
+            <strong id="bannerTitle">Waiting for data…</strong>
+            <span id="bannerSub">Click "Start simulation" to begin streaming readings</span>
+          </div>
+        </div>
+
+        <div class="grid-4">
+          <div class="card">
+            <h3>Actual frequency value</h3>
+            <div class="readout" id="readFrequency">—</div>
+          </div>
+          <div class="card">
+            <h3>Fraction of second</h3>
+            <div class="readout" id="readFraction">—</div>
+          </div>
+          <div class="card">
+            <h3>Interarrival time</h3>
+            <div class="readout" id="readInterarrival">—</div>
+          </div>
+          <div class="card">
+            <h3>Time difference</h3>
+            <div class="readout" id="readTimeDiff">—</div>
+          </div>
+        </div>
+
+        <div class="grid-3">
+          <div class="card">
+            <div class="card-title-row">
+              <h2>Latest prediction</h2>
+              <span class="tag" id="readingTimestamp">—</span>
+            </div>
+            <div class="kv-row"><span class="k">Predicted class</span><span class="v" id="predClass">—</span></div>
+            <div class="kv-row"><span class="k">Confidence</span><span class="v" id="predConfidence">—</span></div>
+            <div class="kv-row"><span class="k">Ground truth (dataset label)</span><span class="v"
+                id="predGroundTruth">—</span></div>
+            <div class="kv-row"><span class="k">Time synchronized flag</span><span class="v" id="predTimeSync">—</span>
+            </div>
+          </div>
+
+          <div class="card risk-block">
+            <h3 style="align-self:flex-start;">Risk Score</h3>
+            <div class="readout" id="riskScoreNum" style="font-size:34px; margin-top:10px;">—</div>
+            <div class="risk-level" id="riskLevelText">—</div>
+            <div class="risk-sub">based on model confidence and predicted class</div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title-row">
+            <h2>Recent Incidents</h2>
+            <span class="tag">click a row to open Attack Detection</span>
+          </div>
+          <table class="log-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Source</th>
+                <th>Attack Type</th>
+                <th>Confidence</th>
+                <th>Risk</th>
+              </tr>
+            </thead>
+            <tbody id="incidentsTableBody">
+              <tr class="empty-row">
+                <td colspan="5">No incidents yet</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- PAGE 2: ATTACK DETECTION -->
+      <section class="page" id="page-detection">
+        <div class="page-head">
+          <div>
+            <h1>Attack Detection</h1>
+            <p id="detectionSubtitle">Select an incident from the Dashboard to see details</p>
+          </div>
+          <span class="scope-note">Predicted vs. ground truth</span>
+        </div>
+
+        <div id="detectionEmpty" class="loading-msg">No incident selected yet — go to the Dashboard and click a row in
+          "Recent Incidents".</div>
+
+        <div id="detectionContent" style="display:none;">
+          <div class="detail-grid">
+            <div class="card">
+              <h3 style="margin-bottom:12px;">Incident details</h3>
+              <div class="kv-row"><span class="k">Incident ID</span><span class="v" id="detIncidentId">—</span></div>
+              <div class="kv-row"><span class="k">Detected at</span><span class="v mono" id="detTimestamp">—</span>
+              </div>
+              <div class="kv-row"><span class="k">Source</span><span class="v" id="detSource">—</span></div>
+              <div class="kv-row"><span class="k">Manipulated field(s)</span><span class="v"
+                  id="detManipulated">—</span></div>
+              <div class="kv-row"><span class="k">Attack type</span><span class="v" id="detAttackType">—</span></div>
+              <div class="kv-row"><span class="k">Confidence</span><span class="v" id="detConfidence">—</span></div>
+              <div class="kv-row"><span class="k">Risk level</span><span class="v" id="detRiskLevel">—</span></div>
+            </div>
+
+            <div class="card">
+              <h3 style="margin-bottom:12px;">Predicted vs. actual (ground truth)</h3>
+              <div class="compare-row">
+                <div class="compare-box" id="gtBox">
+                  <div class="lbl">Ground truth</div>
+                  <div class="val" id="detGroundTruth">—</div>
+                </div>
+                <div class="compare-box" id="predBox">
+                  <div class="lbl">Model predicted</div>
+                  <div class="val" id="detPrediction">—</div>
+                </div>
+              </div>
+              <p style="font-size:12.5px; color:var(--text-dim); margin-top:14px; line-height:1.6;" id="detStatusNote">
+                Prediction status: <span id="detStatus">—</span>
+              </p>
+            </div>
+          </div>
+
+          <div class="card" style="margin-bottom:20px;">
+            <h3 style="margin-bottom:8px;">Automated response (simulated)</h3>
+            <span class="sim-only-label">Simulation only — no real grid control is performed</span>
+            <div class="response-flow">
+              <div class="response-step"><span class="step-num">1</span><span class="step-txt">Quarantine suspicious
+                  reading</span></div>
+              <div class="response-step"><span class="step-num">2</span><span class="step-txt">Switch to trusted /
+                  fallback data</span></div>
+              <div class="response-step"><span class="step-num">3</span><span class="step-txt">Increase monitoring
+                  frequency</span></div>
+              <div class="response-step"><span class="step-num">4</span><span class="step-txt">Generate alert to
+                  operator</span></div>
+              <div class="response-step"><span class="step-num">5</span><span class="step-txt">Log incident for forensic
+                  audit</span></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <button class="btn-secondary" onclick="goToShapForCurrentIncident()">View SHAP explanation for this incident
+              →</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- PAGE 3: SHAP EXPLANATION -->
+      <section class="page" id="page-shap">
+        <div class="page-head">
+          <div>
+            <h1>Why was this flagged?</h1>
+            <p id="shapSubtitle">SHAP feature contributions for the selected incident</p>
+          </div>
+        </div>
+
+        <div id="shapEmpty" class="loading-msg">No incident selected yet — go to the Dashboard and click a row in
+          "Recent Incidents".</div>
+
+        <div id="shapContent" style="display:none;">
+          <div class="card" style="margin-bottom:18px;">
+            <h3 style="margin-bottom:16px;">Feature contributions</h3>
+            <div id="shapSummary" class="shap-summary"></div>
+            <div id="shapRows"></div>
+            <div class="shap-legend">
+              <span><span class="sw" style="background:var(--red)"></span>pushes toward the predicted attack
+                class</span>
+              <span><span class="sw" style="background:var(--cyan)"></span>pushes away from it</span>
+            </div>
+          </div>
+
+          <div class="card">
+            <h3 style="margin-bottom:10px;">In plain terms</h3>
+            <div class="explain-box">
+              These features had the strongest influence on this prediction — the ones with the largest bars
+              (positive or negative) moved the Random Forest's decision the most for this particular reading.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- PAGE 4: WHAT-IF SIMULATOR (admin only) -->
+      <section class="page" id="page-whatif">
+        <div class="page-head">
+          <div>
+            <h1>What-If Attack Simulator</h1>
+            <p>Manually set the five model inputs and see what the model predicts</p>
+          </div>
+          <span class="scope-note">Admin only</span>
+        </div>
+
+        <div class="card">
+          <div class="whatif-grid">
+            <div class="whatif-field">
+              <label>Actual frequency value (Hz)</label>
+              <input type="number" step="any" id="wiFrequency" value="60.0" />
+              <div class="hint">Nominal is around 60.0</div>
+            </div>
+            <div class="whatif-field">
+              <label>Fraction of second</label>
+              <input type="number" step="any" id="wiFraction" value="500" />
+            </div>
+            <div class="whatif-field">
+              <label>Time synchronized</label>
+              <input type="number" step="any" id="wiTimeSync" value="0" />
+            </div>
+            <div class="whatif-field">
+              <label>Interarrival time (seconds)</label>
+              <input type="number" step="any" id="wiInterarrival" value="0.05" />
+            </div>
+            <div class="whatif-field">
+              <label>Time difference (seconds)</label>
+              <input type="number" step="any" id="wiTimeDiff" value="0.8" />
+              <div class="hint">TSA rows in the dataset often show large or negative values here</div>
+            </div>
+          </div>
+
+          <div id="wiError" class="field-error" style="display:none;"></div>
+          <button class="btn-primary" style="width:auto; padding:10px 22px;" onclick="runWhatIf()">Run
+            prediction</button>
+
+          <div class="whatif-result" id="wiResult">
+            <div class="grid-3" style="margin-top:20px; margin-bottom:0;">
+              <div class="card">
+                <h3>Result</h3>
+                <div class="kv-row"><span class="k">Predicted class</span><span class="v" id="wiClass">—</span></div>
+                <div class="kv-row"><span class="k">Confidence</span><span class="v" id="wiConfidence">—</span></div>
+              </div>
+              <div class="card risk-block">
+                <h3 style="align-self:flex-start;">Risk</h3>
+                <div class="readout" id="wiRiskScore" style="font-size:30px; margin-top:8px;">—</div>
+                <div class="risk-level" id="wiRiskLevel">—</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="js/app.js"></script>
+</body>
+
+</html>
