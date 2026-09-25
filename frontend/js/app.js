@@ -5,11 +5,57 @@
 // instead of leaving blank/undefined values on the page.
 // ===========================================================================
 
-const API_BASE = "http://127.0.0.1:5000";
+const API_BASE = (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
+  ? `http://${window.location.hostname}:5000`
+  : "http://127.0.0.1:5000";
 
 let currentRole = null;
 let currentIncidentId = null;
 let dashboardPollTimer = null;
+
+// Keys used to persist the session in localStorage so it survives page
+// reloads (a full refresh, Live Server's auto-reload on file change, etc).
+// This is a demo token, not a real auth scheme -- don't treat it as secure.
+const TOKEN_KEY = "gridsentry_token";
+const ROLE_KEY = "gridsentry_role";
+
+// ---------------------------------------------------------------------------
+// Session restore — runs once when app.js loads (i.e. on every page load).
+// If we find a saved token, skip the login screen and go straight to the
+// dashboard instead of forcing the user to sign in again.
+// ---------------------------------------------------------------------------
+function restoreSession() {
+  const token = localStorage.getItem(TOKEN_KEY);
+  const role = localStorage.getItem(ROLE_KEY);
+  if (token && role) {
+    enterApp(role);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Shared "show the app UI" logic, used by both a fresh login and a
+// restored session on page load.
+// ---------------------------------------------------------------------------
+function enterApp(role) {
+  currentRole = role;
+  document.getElementById("login").style.display = "none";
+  document.getElementById("app").classList.add("visible");
+  document.getElementById("rolePill").textContent =
+    "Role: " + (currentRole === "admin" ? "Admin" : "User");
+
+  // What-If Simulator is admin-only
+  document.getElementById("navWhatIf").hidden = currentRole !== "admin";
+
+  syncDomainDropdown();
+
+  if (dashboardPollTimer) clearInterval(dashboardPollTimer);
+  try {
+    updateDashboard();
+    dashboardPollTimer = setInterval(updateDashboard, 2000);
+  } catch (e) {
+    console.warn("Dashboard update warning:", e);
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Login / logout
@@ -26,40 +72,40 @@ async function loginUser() {
     return;
   }
 
+  let data;
   try {
     const res = await fetch(`${API_BASE}/api/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ username, password }),
     });
-    const data = await res.json();
+    data = await res.json();
 
     if (!res.ok || !data.success) {
       errorBox.textContent = data.error || "Invalid username or password.";
       errorBox.classList.add("visible");
       return;
     }
-
-    currentRole = data.role;
-    document.getElementById("login").style.display = "none";
-    document.getElementById("app").classList.add("visible");
-    document.getElementById("rolePill").textContent =
-      "Role: " + (currentRole === "admin" ? "Admin" : "User");
-
-    // What-If Simulator is admin-only
-    document.getElementById("navWhatIf").hidden = currentRole !== "admin";
-
-    updateDashboard();
-    dashboardPollTimer = setInterval(updateDashboard, 2000);
   } catch (err) {
-    errorBox.textContent = "Unable to connect to the GridSentry backend. Is server.py running?";
+    console.error("Login fetch error:", err);
+    errorBox.textContent = "Unable to connect to the GridSentry backend. Is server.py running on port 5000?";
     errorBox.classList.add("visible");
+    return;
   }
+
+  // Persist the session so a reload (manual refresh, Live Server
+  // auto-reload, etc.) doesn't bounce the user back to the sign-in screen.
+  localStorage.setItem(TOKEN_KEY, data.token);
+  localStorage.setItem(ROLE_KEY, data.role);
+
+  enterApp(data.role);
 }
 
 function logout() {
   currentRole = null;
   currentIncidentId = null;
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(ROLE_KEY);
   if (dashboardPollTimer) clearInterval(dashboardPollTimer);
   document.getElementById("app").classList.remove("visible");
   document.getElementById("login").style.display = "flex";
@@ -91,11 +137,146 @@ async function updateDashboard() {
   await Promise.all([loadLatestReading(), loadIncidents(), loadSimulationStatus(), loadIncidentDropdowns()]);
 }
 
+async function handleRefreshClick() {
+  const btn = document.getElementById("btnRefresh");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "↻ Refreshing…";
+  }
+  try {
+    await updateDashboard();
+    if (btn) {
+      btn.textContent = "✓ Refreshed";
+      setTimeout(() => {
+        btn.textContent = "Refresh now";
+        btn.disabled = false;
+      }, 700);
+    }
+  } catch (err) {
+    if (btn) {
+      btn.textContent = "Refresh now";
+      btn.disabled = false;
+    }
+  }
+}
+
+let currentLogFilter = "all";
+let cachedIncidentsList = [];
+
+function updateDomainHeaderInfo(domainKey) {
+  const subTitleEl = document.getElementById("dashSubTitle");
+  const scopeNoteEl = document.getElementById("dashScopeNote");
+  if (!subTitleEl || !scopeNoteEl) return;
+
+  const infoMap = {
+    "FDI_TSA": {
+      sub: "Simulated real-time PMU feed (IEEE C37.118), replayed from dataset",
+      scope: "Classes: FDI · Normal · TSA"
+    },
+    "IEC61850": {
+      sub: "Substation Process Bus GOOSE/SV feed (IEC 61850), replayed from dataset",
+      scope: "Classes: Normal · Replay · Fault · Injection · Masquerade"
+    },
+    "IEC104": {
+      sub: "SCADA Telecontrol Protocol feed (IEC 60870-5-104), replayed from dataset",
+      scope: "Classes: Normal · Command Injection · Telemetry Spoofing"
+    },
+    "MSU_ORNL": {
+      sub: "Power Transmission Protection feed (MSU / ORNL), replayed from dataset",
+      scope: "Classes: Natural · Line Fault · Trip Maintenance"
+    },
+    "UPLOADED": {
+      sub: "Custom simulation feed from uploaded dataset",
+      scope: "Classes: Dynamic Model Classification"
+    }
+  };
+
+  const info = infoMap[domainKey] || infoMap["FDI_TSA"];
+  subTitleEl.textContent = info.sub;
+  scopeNoteEl.textContent = info.scope;
+}
+
+async function syncDomainDropdown() {
+  try {
+    const res = await fetch(`${API_BASE}/api/simulation/domains`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const sel = document.getElementById("simDomainSelect");
+    if (!sel) return;
+
+    const currentVal = data.active_domain || sel.value;
+    const optionsHtml = (data.available_domains || []).map((d) => `
+      <option value="${d.id}" ${d.id === currentVal ? "selected" : ""}>${d.name}</option>
+    `).join("");
+    sel.innerHTML = optionsHtml;
+    sel.value = currentVal;
+    updateDomainHeaderInfo(currentVal);
+  } catch (e) {
+    console.warn("syncDomainDropdown error:", e);
+  }
+}
+
+async function switchSimulationDomain(domainId) {
+  try {
+    const res = await fetch(`${API_BASE}/api/simulation/domain`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain: domainId }),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.latest_reading) {
+        renderTelemetryCards(data.latest_reading);
+      }
+      updateDomainHeaderInfo(domainId);
+      await updateDashboard();
+    }
+  } catch (err) {
+    console.error("Failed to switch domain:", err);
+  }
+}
+
 function fmt(value, decimals = 4) {
   if (value === null || value === undefined) return "—";
   const n = Number(value);
   if (Number.isNaN(n)) return String(value);
   return n.toFixed(decimals);
+}
+
+function renderTelemetryCards(data) {
+  const gridEl = document.getElementById("telemetryGrid");
+  if (!gridEl || !data) return;
+
+  let items = [];
+  if (Array.isArray(data.display_features) && data.display_features.length > 0) {
+    items = data.display_features;
+  } else if (data.features && typeof data.features === "object" && Object.keys(data.features).length > 0) {
+    items = Object.entries(data.features).slice(0, 4).map(([k, v]) => ({
+      name: k,
+      value: typeof v === "number" ? v.toFixed(4) : String(v),
+      unit: ""
+    }));
+  }
+
+  if (items.length === 0) return;
+
+  const colCount = Math.min(Math.max(items.length, 1), 4);
+  gridEl.style.display = "grid";
+  gridEl.style.gridTemplateColumns = `repeat(${colCount}, 1fr)`;
+  gridEl.style.gap = "14px";
+  gridEl.style.marginBottom = "22px";
+
+  gridEl.innerHTML = items.map((item, idx) => {
+    const valText = (item.value !== null && item.value !== undefined && item.value !== "") ? item.value : "—";
+    const unitHtml = item.unit ? `<span class="unit"> ${item.unit}</span>` : "";
+    return `
+      <div class="card" id="cardFeat_${idx}">
+        <h3 id="featTitle${idx}" title="${item.name}">${item.name}</h3>
+        <div class="readout" id="readFeat_${idx}">${valText}${unitHtml}</div>
+        <div class="delta" style="font-size:11.5px; color:var(--text-dim); margin-top:4px;">Live Sensor Telemetry</div>
+      </div>
+    `;
+  }).join("");
 }
 
 async function loadLatestReading() {
@@ -105,68 +286,155 @@ async function loadLatestReading() {
     const data = await res.json();
 
     if (!res.ok) {
-      // No readings yet is expected before the first simulation run - not a hard error.
       return;
     }
     errorBox.innerHTML = "";
 
-    const f = data.features || {};
-    document.getElementById("readFrequency").textContent = fmt(f["Actual frequency value"], 4) + " Hz";
-    document.getElementById("readFraction").textContent = fmt(f["Fraction of second"], 2);
-    document.getElementById("readInterarrival").textContent = fmt(f["interarrival time"], 5) + " s";
-    document.getElementById("readTimeDiff").textContent = fmt(f["time difference"], 4) + " s";
+    // Dynamic Display Features (Adapts automatically to active dataset/domain)
+    renderTelemetryCards(data);
 
     document.getElementById("readingTimestamp").textContent = data.timestamp || "—";
     document.getElementById("predClass").textContent = data.prediction || "—";
     document.getElementById("predConfidence").textContent =
       data.confidence != null ? data.confidence + "%" : "—";
     document.getElementById("predGroundTruth").textContent = data.ground_truth_label || "—";
-    document.getElementById("predTimeSync").textContent =
-      f["Time synchronized"] != null ? f["Time synchronized"] : "—";
+    
+    const predDomainEl = document.getElementById("predDomain");
+    if (predDomainEl) {
+      predDomainEl.textContent = data.domain || data.source || "PMU Synchrophasor (IEEE C37.118)";
+    }
 
     const riskScoreEl = document.getElementById("riskScoreNum");
     const riskLevelEl = document.getElementById("riskLevelText");
     riskScoreEl.textContent = data.risk_score != null ? data.risk_score : "—";
     riskLevelEl.textContent = data.risk_level || "—";
-    riskLevelEl.className = "risk-level " + (data.risk_level ? data.risk_level.toLowerCase() : "");
+    riskLevelEl.className = "risk-level " + (data.risk_level ? data.risk_level.toLowerCase() : "normal");
 
     const banner = document.getElementById("statusBanner");
-    const isAttack = data.prediction && data.prediction !== "Normal";
+    const isAttack = data.prediction && data.prediction !== "Normal" && data.prediction !== "Natural";
     banner.className = "status-banner " + (isAttack ? "attack" : "normal");
     document.getElementById("bannerTitle").textContent = isAttack
-      ? `${data.prediction} detected on the current PMU reading`
-      : (data.prediction === "Normal" ? "System operating normally" : "Waiting for data…");
+      ? `${data.prediction} detected on active telemetry feed`
+      : (data.prediction === "Normal" || data.prediction === "Natural" ? "System operating normally" : "Waiting for data…");
     document.getElementById("bannerSub").textContent = isAttack
-      ? `Confidence ${data.confidence}% · Risk: ${data.risk_level}`
-      : "Simulated feed running from the historical dataset";
+      ? `Confidence ${data.confidence}% · Risk: ${data.risk_level} (${data.risk_score}/100)`
+      : `Nominal baseline telemetry · Domain: ${data.domain || 'PMU Synchrophasor'}`;
   } catch (err) {
     errorBox.innerHTML = `<div class="error-msg">Unable to connect to GridSentry backend. Make sure server.py is running on ${API_BASE}.</div>`;
   }
 }
 
+function setLogFilter(filterName) {
+  currentLogFilter = filterName;
+  document.querySelectorAll(".pill-btn").forEach(btn => btn.classList.remove("active"));
+  const btnId = "filter" + filterName.charAt(0).toUpperCase() + filterName.slice(1);
+  const activeBtn = document.getElementById(btnId);
+  if (activeBtn) activeBtn.classList.add("active");
+  renderIncidentsTable(cachedIncidentsList);
+}
+
+function renderIncidentsTable(incidents) {
+  const tbody = document.getElementById("incidentsTableBody");
+  if (!tbody) return;
+
+  if (!Array.isArray(incidents) || incidents.length === 0) {
+    tbody.innerHTML =
+      '<tr class="empty-row"><td colspan="5">No telemetry records yet</td></tr>';
+    return;
+  }
+
+  let filtered = incidents;
+
+  // Attacks Only
+  if (currentLogFilter === "attacks") {
+    filtered = incidents.filter(
+      i =>
+        i.attack_type !== "Normal" &&
+        i.attack_type !== "Natural"
+    );
+  }
+
+  // Normal Baseline
+  else if (currentLogFilter === "normal") {
+    filtered = incidents.filter(
+      i =>
+        i.attack_type === "Normal" ||
+        i.attack_type === "Natural"
+    );
+  }
+
+  if (filtered.length === 0) {
+    tbody.innerHTML =
+      `<tr class="empty-row">
+        <td colspan="5">No ${currentLogFilter} records in current feed</td>
+       </tr>`;
+    return;
+  }
+
+  tbody.innerHTML = filtered
+    .map((inc) => {
+      const isNormal =
+        inc.attack_type === "Normal" ||
+        inc.attack_type === "Natural";
+
+      let riskLevel = inc.risk_level || "—";
+
+      // Keep Normal only for normal telemetry
+      if (isNormal) {
+        riskLevel = "Normal";
+      }
+
+      // CSS class for Low / Medium / Critical
+      let badgeClass = "normal";
+
+      if (!isNormal) {
+        badgeClass = riskLevel.toLowerCase();
+      }
+
+      const classDisplay = isNormal
+        ? `<span style="color:var(--green); font-weight:600;">
+             ✓ Normal
+           </span>`
+        : `<span style="color:var(--text); font-weight:600;">
+             ${inc.attack_type}
+           </span>`;
+
+      return `
+        <tr class="clickable" onclick="openIncident(${inc.id})">
+          <td class="mono">
+            ${(inc.timestamp || "")
+              .slice(0, 19)
+              .replace("T", " ")}
+          </td>
+
+          <td>${inc.source || "—"}</td>
+
+          <td>${classDisplay}</td>
+
+          <td>
+            ${inc.confidence != null
+              ? inc.confidence + "%"
+              : "—"}
+          </td>
+
+          <td>
+            <span class="badge ${badgeClass}">
+              ${riskLevel}
+            </span>
+          </td>
+        </tr>
+      `;
+    })
+    .join("");
+}
+
 async function loadIncidents() {
   try {
     const res = await fetch(`${API_BASE}/api/incidents`);
+    if (!res.ok) return;
     const incidents = await res.json();
-
-    const tbody = document.getElementById("incidentsTableBody");
-    if (!Array.isArray(incidents) || incidents.length === 0) {
-      tbody.innerHTML = '<tr class="empty-row"><td colspan="5">No incidents yet</td></tr>';
-      return;
-    }
-
-    tbody.innerHTML = incidents
-      .map(
-        (inc) => `
-        <tr class="clickable" onclick="openIncident(${inc.id})">
-          <td class="mono">${(inc.timestamp || "").slice(0, 19).replace("T", " ")}</td>
-          <td>${inc.source || "—"}</td>
-          <td>${inc.attack_type}</td>
-          <td>${inc.confidence != null ? inc.confidence + "%" : "—"}</td>
-          <td><span class="badge attack">${inc.risk_level || "—"}</span></td>
-        </tr>`
-      )
-      .join("");
+    cachedIncidentsList = incidents;
+    renderIncidentsTable(cachedIncidentsList);
   } catch (err) {
     // Errors here are surfaced by loadLatestReading's connection check already.
   }
@@ -211,6 +479,76 @@ async function stopSimulation() {
     updateDashboard();
   } catch (err) {
     // ignore, dashboard poll will surface connection errors
+  }
+}
+
+async function uploadSimulationDataset(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  const errorBox = document.getElementById("dashboardError");
+  errorBox.innerHTML = `<div style="background:var(--panel-2); border-left:3px solid var(--cyan); padding:10px 14px; margin-bottom:14px; border-radius:4px; font-size:13px; color:var(--text);">Analyzing uploaded dataset <strong>${file.name}</strong> and matching compatible models...</div>`;
+
+  const formData = new FormData();
+  formData.append("file", file);
+
+  try {
+    const res = await fetch(`${API_BASE}/api/datasets/upload`, {
+      method: "POST",
+      body: formData,
+    });
+    const data = await res.json();
+
+    if (res.status === 422 || data.status === "rejected") {
+      errorBox.innerHTML = `<div class="error-msg" style="margin-bottom:14px;"><strong>Upload Incompatible:</strong> ${data.message}</div>`;
+      event.target.value = "";
+      return;
+    }
+
+    if (!res.ok || data.status === "error") {
+      errorBox.innerHTML = `<div class="error-msg" style="margin-bottom:14px;"><strong>Upload Error:</strong> ${data.error || data.message || "Failed to process dataset."}</div>`;
+      event.target.value = "";
+      return;
+    }
+
+    const isAttack = data.prediction && data.prediction !== "Normal" && data.prediction !== "Natural";
+    const statusClass = isAttack ? "attack" : "normal";
+    errorBox.innerHTML = `
+      <div style="background:var(--panel); border:1px solid ${isAttack ? 'var(--red)' : 'var(--cyan)'}; padding:14px; border-radius:6px; margin-bottom:16px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <strong style="color:var(--text); font-size:14px;">Dataset Analysis & Attack Detection Complete</strong>
+          <span class="badge ${statusClass}">${data.prediction}</span>
+        </div>
+        <div style="font-size:12.5px; color:var(--text-dim); line-height:1.6;">
+          • Matched Model: <strong style="color:var(--text);">${data.selected_model}</strong> (${data.domain})<br>
+          • Model Confidence: <strong style="color:var(--text);">${data.confidence}%</strong> · Risk Level: <strong style="color:var(--text);">${data.risk_level}</strong> (${data.risk_score}/100)<br>
+          ${data.is_unknown_attack ? '<span style="color:var(--red);">• Zero-Day / Unknown Anomaly detected via Autoencoder reconstruction error!</span><br>' : ''}
+          • Features evaluated: <code>${(data.features_used || []).join(", ")}</code>
+        </div>
+        ${data.incident_id ? `<div style="margin-top:10px;"><button class="btn-secondary" style="padding:6px 12px; font-size:12px;" onclick="openIncident(${data.incident_id})">View Incident Details & SHAP →</button></div>` : ''}
+      </div>
+    `;
+
+    event.target.value = "";
+    // Immediately show the uploaded dataset values
+    if (data.display_features) {
+      renderTelemetryCards(data);
+    }
+
+    // Refresh dashboard using the newly uploaded dataset
+    await syncDomainDropdown();
+    await updateDashboard();
+    await loadIncidents();
+    await loadIncidentDropdowns();
+
+    // Make sure the uploaded dataset is selected
+    const domainSelect = document.getElementById("simDomainSelect");
+    if (domainSelect) {
+      domainSelect.value = "UPLOADED";
+    }
+  } catch (err) {
+    errorBox.innerHTML = `<div class="error-msg" style="margin-bottom:14px;">Unable to upload dataset. Ensure backend server is running.</div>`;
+    event.target.value = "";
   }
 }
 
@@ -435,3 +773,7 @@ async function runWhatIf() {
     errorBox.style.display = "block";
   }
 }
+
+// Try to restore an existing session as soon as this script runs (it's
+// loaded at the end of <body>, so the DOM is already parsed at this point).
+restoreSession();

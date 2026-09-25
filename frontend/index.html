@@ -24,15 +24,17 @@
 
       <div id="loginError" class="login-error"></div>
 
-      <div class="field">
-        <label>Username</label>
-        <input type="text" id="username" value="admin" />
-      </div>
-      <div class="field">
-        <label>Password</label>
-        <input type="password" id="password" value="admin123" />
-      </div>
-      <button class="btn-primary" onclick="loginUser()">Sign in</button>
+      <form onsubmit="event.preventDefault(); loginUser();">
+        <div class="field">
+          <label>Username</label>
+          <input type="text" id="username" value="admin" autocomplete="username" />
+        </div>
+        <div class="field">
+          <label>Password</label>
+          <input type="password" id="password" value="admin123" autocomplete="current-password" />
+        </div>
+        <button type="submit" class="btn-primary">Sign in</button>
+      </form>
       <p class="demo-creds">Demo accounts: admin / admin123 (admin role)<br />operator / operator123 (user role)</p>
     </div>
   </div>
@@ -67,18 +69,26 @@
       <section class="page active" id="page-dashboard">
         <div class="page-head">
           <div>
-            <h1>Monitoring Dashboard</h1>
-            <p>Simulated real-time PMU feed, replayed from the historical dataset</p>
+            <h1 id="dashHeadTitle">Monitoring Dashboard</h1>
+            <p id="dashSubTitle">Simulated real-time PMU feed, replayed from the historical dataset</p>
           </div>
-          <span class="scope-note">Classes: FDI · Normal · TSA</span>
+          <span class="scope-note" id="dashScopeNote">Classes: FDI · Normal · TSA</span>
         </div>
 
         <div class="sim-controls">
           <span class="sim-dot" id="simDot"></span>
           <span class="sim-status-text" id="simStatusText">Simulation stopped</span>
+          <select id="simDomainSelect" class="btn-secondary" style="background:var(--panel-2); color:var(--text); border:1px solid var(--line); border-radius:6px; padding:6px 10px; font-size:13px;" onchange="switchSimulationDomain(this.value)">
+            <option value="FDI_TSA">PMU Synchrophasor (FDI / TSA)</option>
+            <option value="IEC61850">Substation Process Bus (IEC 61850)</option>
+            <option value="IEC104">SCADA Telecontrol (IEC 60870-5-104)</option>
+            <option value="MSU_ORNL">Transmission Protection (MSU / ORNL)</option>
+          </select>
           <button class="btn-secondary" onclick="startSimulation()">Start simulation</button>
           <button class="btn-secondary" onclick="stopSimulation()">Stop simulation</button>
-          <button class="btn-secondary" onclick="updateDashboard()">Refresh now</button>
+          <button class="btn-secondary" id="btnRefresh" onclick="handleRefreshClick()">Refresh now</button>
+          <button class="btn-secondary" onclick="document.getElementById('datasetFileInput').click()">Upload dataset</button>
+          <input type="file" id="datasetFileInput" accept=".csv" style="display:none" onchange="uploadSimulationDataset(event)" />
         </div>
 
         <div id="dashboardError"></div>
@@ -91,22 +101,26 @@
           </div>
         </div>
 
-        <div class="grid-4">
+        <div class="grid-4" id="telemetryGrid">
           <div class="card">
-            <h3>Actual frequency value</h3>
+            <h3 id="featTitle0">Actual frequency value</h3>
             <div class="readout" id="readFrequency">—</div>
+            <div class="delta" style="font-size:11.5px; color:var(--text-dim); margin-top:4px;">Live Sensor Telemetry</div>
           </div>
           <div class="card">
-            <h3>Fraction of second</h3>
+            <h3 id="featTitle1">Fraction of second</h3>
             <div class="readout" id="readFraction">—</div>
+            <div class="delta" style="font-size:11.5px; color:var(--text-dim); margin-top:4px;">Live Sensor Telemetry</div>
           </div>
           <div class="card">
-            <h3>Interarrival time</h3>
+            <h3 id="featTitle2">Interarrival time</h3>
             <div class="readout" id="readInterarrival">—</div>
+            <div class="delta" style="font-size:11.5px; color:var(--text-dim); margin-top:4px;">Live Sensor Telemetry</div>
           </div>
           <div class="card">
-            <h3>Time difference</h3>
+            <h3 id="featTitle3">Time difference</h3>
             <div class="readout" id="readTimeDiff">—</div>
+            <div class="delta" style="font-size:11.5px; color:var(--text-dim); margin-top:4px;">Live Sensor Telemetry</div>
           </div>
         </div>
 
@@ -120,7 +134,7 @@
             <div class="kv-row"><span class="k">Confidence</span><span class="v" id="predConfidence">—</span></div>
             <div class="kv-row"><span class="k">Ground truth (dataset label)</span><span class="v"
                 id="predGroundTruth">—</span></div>
-            <div class="kv-row"><span class="k">Time synchronized flag</span><span class="v" id="predTimeSync">—</span>
+            <div class="kv-row"><span class="k">Active Domain / Protocol</span><span class="v" id="predDomain">PMU Synchrophasor (IEEE C37.118)</span>
             </div>
           </div>
 
@@ -133,23 +147,30 @@
         </div>
 
         <div class="card">
-          <div class="card-title-row">
-            <h2>Recent Incidents</h2>
-            <span class="tag">click a row to open Attack Detection</span>
+          <div class="card-title-row" style="flex-wrap:wrap; gap:10px;">
+            <div>
+              <h2 id="tableTitle">Telemetry & Security Event Log</h2>
+              <span class="tag" style="font-size:11.5px; color:var(--text-dim);">Live streaming records & security alerts (click any row for details)</span>
+            </div>
+            <div class="filter-pills">
+              <button class="pill-btn active" id="filterAll" onclick="setLogFilter('all')">All Telemetry</button>
+              <button class="pill-btn" id="filterAttacks" onclick="setLogFilter('attacks')">Attacks Only</button>
+              <button class="pill-btn" id="filterNormal" onclick="setLogFilter('normal')">Normal Baseline</button>
+            </div>
           </div>
           <table class="log-table">
             <thead>
               <tr>
                 <th>Time</th>
-                <th>Source</th>
-                <th>Attack Type</th>
+                <th>Source / Protocol</th>
+                <th>Classification</th>
                 <th>Confidence</th>
-                <th>Risk</th>
+                <th>Risk Level</th>
               </tr>
             </thead>
             <tbody id="incidentsTableBody">
               <tr class="empty-row">
-                <td colspan="5">No incidents yet</td>
+                <td colspan="5">Loading telemetry…</td>
               </tr>
             </tbody>
           </table>

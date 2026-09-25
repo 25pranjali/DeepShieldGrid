@@ -1,0 +1,31 @@
+{
+  "algorithm": "PSO",
+  "original_feature_count": 5,
+  "selected_feature_count": 3,
+  "selected_features": [
+    "Actual frequency value",
+    "interarrival time",
+    "time difference"
+  ],
+  "selected_indices": [
+    0,
+    3,
+    4
+  ],
+  "best_fitness": 0.08,
+  "validation_macro_f1": 0.9778,
+  "optimization_time_seconds": 3.5,
+  "fitness_history": [
+    0.09021214631819437,
+    0.08000800320128051,
+    0.08000800320128051,
+    0.08000800320128051,
+    0.08000800320128051,
+    0.08000800320128051,
+    0.08000800320128051,
+    0.08000800320128051,
+    0.08000800320128051,
+    0.08000800320128051,
+    0.08000800320128051
+  ]
+}

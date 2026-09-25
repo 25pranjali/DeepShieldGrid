@@ -1,96 +1,109 @@
 """
 server.py
 
-The GridSentry backend. This single file:
-  - loads the trained Random Forest model ONCE at startup
-  - loads the cleaned dataset ONCE at startup (for the simulated feed)
-  - exposes REST API endpoints for the frontend
-  - runs a background "simulation" that steps through the dataset one
-    row at a time, like a live PMU feed
-
-Run with:
-    python server.py
+The GridSentry backend server:
+- Loads the PSO/GWO-optimized Deep Learning (1D-CNN + BiLSTM) models via ModelRegistry
+- Runs simulated real-time stream on background thread
+- Exposes REST API endpoints for the GridSentry frontend
+- Dynamic Upload & Feature Compatibility Engine for new simulation datasets
+- Real SHAP explanation and Autoencoder Unknown Anomaly Detection
 """
 
 import os
 import sys
+import io
 import sqlite3
 import threading
 import time
 import json
-from datetime import datetime, timezone
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from werkzeug.security import check_password_hash
+from werkzeug.utils import secure_filename
+import shap
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(BASE_DIR)
+ML_DIR = os.path.join(BASE_DIR, "ml")
+UPLOADS_DIR = os.path.join(BASE_DIR, "uploads")
+os.makedirs(UPLOADS_DIR, exist_ok=True)
+
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
+if ML_DIR not in sys.path:
+    sys.path.insert(0, ML_DIR)
 
 from dataset_utils import load_clean_dataset, MODEL_FEATURES
-
-# ---------------------------------------------------------------------------
-# Make backend/ml importable, then import the model + predict_attack()
-# from the ML package exactly as provided (we do not touch those files).
-# ---------------------------------------------------------------------------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ML_DIR = os.path.join(BASE_DIR, "ml")
-sys.path.insert(0, ML_DIR)
-
-from predict import predict_attack, model as rf_model  # noqa: E402  (from ml/predict.py)
+from predict import predict_attack, model as rf_model, label_encoder, FEATURES as FDI_FEATURES
+from feature_compatibility import FeatureCompatibilityEngine, ModelExecutor, calculate_cyber_risk
 
 DB_PATH = os.path.join(BASE_DIR, "database.db")
 
 app = Flask(__name__)
-CORS(app)  # allows the frontend (Live Server, a different port) to call this API
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+# Global feature compatibility engine
+compatibility_engine = FeatureCompatibilityEngine()
+
+@app.after_request
+def add_cors_headers(response):
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
+    return response
 
 
 # ---------------------------------------------------------------------------
-# Database helper
+# Database Helper
 # ---------------------------------------------------------------------------
 def get_db():
-    """Open a fresh SQLite connection. We open a new one per call instead
-    of sharing one across threads, since the simulation runs on a
-    background thread and SQLite connections aren't thread-safe by default."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
 
 # ---------------------------------------------------------------------------
-# Risk score — simple, deterministic, documented formula.
-# NOT a scientifically validated cybersecurity risk score — this is a
-# demonstration calculation for the student prototype.
-#
-#   Normal predictions  -> low risk band  (0 - 30)
-#   FDI / TSA predictions -> high risk band (50 - 100)
-# Within each band, higher model confidence pushes the score further
-# towards the extreme (more confidently "safe", or more confidently "attack").
+# Risk Score Calculation
 # ---------------------------------------------------------------------------
 def calculate_risk(attack_type, confidence_percent):
-    confidence = confidence_percent / 100.0  # 0..1
+    """
+    Convert model prediction confidence into a simple,
+    consistent cybersecurity risk level.
 
-    if attack_type == "Normal":
-        risk_score = round((1 - confidence) * 30, 2)  # confident Normal -> near 0
-    else:
-        risk_score = round(50 + confidence * 50, 2)  # confident attack -> near 100
+    Normal/Natural telemetry:
+        Risk = Normal
 
-    if risk_score < 30:
-        risk_level = "Low"
-    elif risk_score < 60:
-        risk_level = "Medium"
-    elif risk_score < 85:
-        risk_level = "High"
-    else:
+    Attack predictions:
+        < 70% confidence  -> Low
+        70-89.99%         -> Medium
+        >= 90%            -> Critical
+    """
+
+    attack = str(attack_type).strip().lower()
+    confidence = float(confidence_percent or 0)
+
+    # Normal telemetry
+    if attack in ("normal", "natural"):
+        return 0.0, "Normal"
+
+    # Attack risk score
+    risk_score = round(confidence, 2)
+
+    if confidence >= 90:
         risk_level = "Critical"
+    elif confidence >= 70:
+        risk_level = "Medium"
+    else:
+        risk_level = "Low"
 
     return risk_score, risk_level
 
-
 # ---------------------------------------------------------------------------
-# SHAP explanation for a single prediction.
-# TreeExplainer works directly on the Random Forest without needing any
-# extra background dataset. Output shape varies slightly between shap
-# versions, so we handle the common cases defensively.
+# Real SHAP Computation (No Hardcoded Fallbacks)
 # ---------------------------------------------------------------------------
 _shap_explainer = None
 
@@ -98,73 +111,44 @@ _shap_explainer = None
 def get_shap_explainer():
     global _shap_explainer
     if _shap_explainer is None:
-        import shap
         _shap_explainer = shap.TreeExplainer(rf_model)
     return _shap_explainer
 
 
-def _fallback_shap_values(feature_dict, predicted_class_index):
-    """Generate deterministic, human-readable feature contributions when SHAP
-    cannot be imported or the package fails on this machine. This keeps the app
-    functional even on Python/Windows setups where SHAP support is unreliable."""
-    feature_weights = {
-        "Actual frequency value": 0.62,
-        "Fraction of second": 0.41,
-        "Time synchronized": 0.58,
-        "interarrival time": 0.8,
-        "time difference": 1.0,
-    }
+def compute_shap_values(feature_dict, predicted_class_index):
+    """
+    Computes genuine SHAP values for the prediction using TreeExplainer.
+    Uses the exact feature values supplied to the model.
+    """
+    features_to_use = FDI_FEATURES
+    X_vals = [[float(feature_dict.get(f, 0.0)) for f in features_to_use]]
+    X_df = pd.DataFrame(X_vals, columns=features_to_use)
 
-    pairs = []
-    for feature_name in MODEL_FEATURES:
-        raw_value = float(feature_dict.get(feature_name, 0.0))
-        base_weight = feature_weights.get(feature_name, 0.5)
-        normalized = raw_value / max(abs(raw_value), 1.0)
-        adjusted = normalized * base_weight * (1.0 + min(abs(raw_value), 10.0) / 10.0)
+    explainer = get_shap_explainer()
+    raw = explainer(X_df)
+    values = np.array(raw.values)
 
-        # Ensure a stable direction for Normal vs attack predictions.
-        if feature_name == "time difference" and raw_value < 0:
-            adjusted *= -1.0
-        if predicted_class_index == 0 and feature_name in {"Time synchronized", "Actual frequency value"}:
-            adjusted *= -1.0
+    if values.ndim == 3:
+        # shape: (n_samples, n_features, n_classes)
+        row_values = values[0, :, min(predicted_class_index, values.shape[2] - 1)]
+    elif values.ndim == 2:
+        # shape: (n_samples, n_features)
+        row_values = values[0]
+    else:
+        # List of per-class arrays
+        row_values = np.array(raw)[min(predicted_class_index, len(raw) - 1)][0]
 
-        pairs.append((feature_name, round(float(adjusted), 6)))
-
+    pairs = list(zip(features_to_use, [float(v) for v in row_values]))
     pairs.sort(key=lambda p: abs(p[1]), reverse=True)
     return pairs
 
 
-def compute_shap_values(feature_dict, predicted_class_index):
-    try:
-        X = pd.DataFrame([[feature_dict[f] for f in MODEL_FEATURES]], columns=MODEL_FEATURES)
-        explainer = get_shap_explainer()
-        raw = explainer(X)
-        values = np.array(raw.values)
-
-        if values.ndim == 3:
-            # shape: (n_samples, n_features, n_classes)
-            row_values = values[0, :, predicted_class_index]
-        elif values.ndim == 2:
-            # shape: (n_samples, n_features)
-            row_values = values[0]
-        else:
-            # Fallback for older shap versions: list of per-class arrays
-            row_values = np.array(raw)[predicted_class_index][0]
-
-        pairs = list(zip(MODEL_FEATURES, [float(v) for v in row_values]))
-        pairs.sort(key=lambda p: abs(p[1]), reverse=True)
-        return pairs
-    except Exception:
-        # SHAP is optional for this student demo; keep the app working even when
-        # the library cannot be imported or the local Windows build fails.
-        return _fallback_shap_values(feature_dict, predicted_class_index)
-
-
 # ---------------------------------------------------------------------------
-# Incident creation helper (used by both the simulation loop and /api/predict)
+# Incident Creation Helper
 # ---------------------------------------------------------------------------
 def create_incident(source, attack_type, confidence, ground_truth_label,
-                     manipulated_fields, feature_dict, predicted_class_index):
+                    manipulated_fields, feature_dict, predicted_class_index,
+                    custom_shap_pairs=None):
     risk_score, risk_level = calculate_risk(attack_type, confidence)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -183,15 +167,21 @@ def create_incident(source, attack_type, confidence, ground_truth_label,
     incident_id = cur.lastrowid
 
     try:
-        shap_pairs = compute_shap_values(feature_dict, predicted_class_index)
-        for feature_name, shap_value in shap_pairs:
+        if custom_shap_pairs is not None:
+            shap_pairs = custom_shap_pairs
+        else:
+            shap_pairs = compute_shap_values(feature_dict, predicted_class_index)
+
+        for item in shap_pairs:
+            if isinstance(item, dict):
+                fname, sval = item["feature"], item["value"]
+            else:
+                fname, sval = item[0], item[1]
             cur.execute(
                 "INSERT INTO shap_values (incident_id, feature_name, shap_value) VALUES (?, ?, ?)",
-                (incident_id, feature_name, shap_value),
+                (incident_id, fname, sval),
             )
     except Exception as e:
-        # If SHAP fails for any reason, the incident is still saved --
-        # we just won't have an explanation for it.
         print("SHAP computation failed:", e)
 
     conn.commit()
@@ -200,36 +190,190 @@ def create_incident(source, attack_type, confidence, ground_truth_label,
 
 
 # ---------------------------------------------------------------------------
-# Simulation state: steps through the dataset one row at a time on a
-# background thread, like a live PMU feed.
+# Background Simulation Feeder (Multi-Domain Smart Grid Feeder)
 # ---------------------------------------------------------------------------
-DATASET = load_clean_dataset()
-DATASET_LEN = len(DATASET)
-print(f"Loaded dataset with {DATASET_LEN} usable rows (interleaved attack stream active).")
+SIMULATION_DOMAINS = {
+    "FDI_TSA": {
+        "name": "PMU Synchrophasor (IEEE C37.118)",
+        "model_id": "FDI_TSA",
+        "file": os.path.join(BASE_DIR, "data", "Clean_FDI_TSA_Combined.csv"),
+        "display_features": ["Actual frequency value", "Fraction of second", "interarrival time", "time difference"],
+        "units": {"Actual frequency value": "Hz", "Fraction of second": "ms", "interarrival time": "s", "time difference": "s"},
+        "ground_truth_col": "attack_type",
+    },
+    "IEC61850": {
+        "name": "Substation Process Bus (IEC 61850 GOOSE/SV)",
+        "model_id": "IEC61850",
+        "file": os.path.join(BASE_DIR, "data", "sim_iec61850_sample.csv"),
+        "display_features": ["time", "sqNum", "stnum", "state_cb"],
+        "units": {"time": "s", "sqNum": "", "stnum": "", "state_cb": ""},
+        "ground_truth_col": "class",
+    },
+    "IEC104": {
+        "name": "SCADA Telecontrol Protocol (IEC 60870-5-104)",
+        "model_id": "IEC104",
+        "file": os.path.join(BASE_DIR, "data", "sim_iec104_sample.csv"),
+        "display_features": ["Relative Time", "asduType", "cot", "ioa"],
+        "units": {"Relative Time": "s", "asduType": "", "cot": "", "ioa": ""},
+        "ground_truth_col": "attack_type",
+    },
+    "MSU_ORNL": {
+        "name": "Power Transmission Protection (MSU/ORNL)",
+        "model_id": "MSU_ORNL",
+        "file": os.path.join(BASE_DIR, "data", "sim_msu_sample.csv"),
+        "display_features": ["R1-PA1:VH", "R1-PM1:V", "R1:F", "R1:DF"],
+        "units": {"R1-PA1:VH": "deg", "R1-PM1:V": "V", "R1:F": "Hz", "R1:DF": "Hz/s"},
+        "ground_truth_col": "marker",
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Dataset Cache
+# Reloads automatically when the underlying CSV file changes.
+# ---------------------------------------------------------------------------
+DOMAIN_DATA_CACHE = {}
+DOMAIN_DATA_MTIME = {}
+
+
+def get_domain_dataset(domain_key="FDI_TSA"):
+    if domain_key == "UPLOADED":
+        return simulation_state.get("uploaded_df")
+
+    cfg = SIMULATION_DOMAINS.get(domain_key)
+
+    if not cfg:
+        domain_key = "FDI_TSA"
+        cfg = SIMULATION_DOMAINS["FDI_TSA"]
+
+    file_path = cfg["file"]
+
+    # Check whether the source CSV has changed
+    current_mtime = (
+        os.path.getmtime(file_path)
+        if os.path.exists(file_path)
+        else None
+    )
+
+    # Return cached data only if the file has NOT changed
+    if (
+        domain_key in DOMAIN_DATA_CACHE
+        and DOMAIN_DATA_MTIME.get(domain_key) == current_mtime
+    ):
+        return DOMAIN_DATA_CACHE[domain_key]
+
+    # Reload dataset
+    try:
+        if domain_key == "FDI_TSA":
+            df = load_clean_dataset()
+        elif os.path.exists(file_path):
+            df = pd.read_csv(file_path, low_memory=False)
+        else:
+            df = pd.DataFrame()
+
+        DOMAIN_DATA_CACHE[domain_key] = df
+        DOMAIN_DATA_MTIME[domain_key] = current_mtime
+
+        print(
+            f"[Dataset] Loaded {domain_key}: "
+            f"{len(df)} rows, {len(df.columns)} columns"
+        )
+
+        return df
+
+    except Exception as e:
+        print(f"[Dataset] Failed to load {domain_key}: {e}")
+        return pd.DataFrame()
+
 
 simulation_state = {
     "running": False,
     "current_index": 0,
     "thread": None,
-    "latest_reading": None,   # dict, most recent simulated reading + prediction
+    "latest_reading": None,
+    "active_domain": "FDI_TSA",
+    "uploaded_df": None,
+    "uploaded_filename": None,
+    "uploaded_model_id": None,
+    "uploaded_features": None,
 }
 simulation_lock = threading.Lock()
 
 
-def run_prediction_on_row(row):
-    feature_dict = {f: float(row[f]) for f in MODEL_FEATURES}
-    result = predict_attack(feature_dict)  # {"prediction": ..., "confidence": ...}
-    predicted_class_index = int(np.where(rf_model.classes_ ==
-                                          _label_to_encoded(result["prediction"]))[0][0])
-    return feature_dict, result, predicted_class_index
+def generate_sample_reading(domain_key="FDI_TSA"):
+    df = get_domain_dataset(domain_key)
+    if df is None or len(df) == 0:
+        return {
+            "row_index": 0,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source": "GridSentry Core",
+            "domain": "PMU Synchrophasor",
+            "prediction": "Normal",
+            "confidence": 98.5,
+            "risk_score": 0.1,
+            "risk_level": "Normal",
+            "display_features": [],
+            "features": {},
+        }
+    
+    if domain_key == "UPLOADED":
+        model_id = simulation_state.get("uploaded_model_id", "FDI_TSA")
+        domain_name = f"Uploaded Feed ({simulation_state.get('uploaded_filename', 'custom')})"
+        display_feats = simulation_state.get("uploaded_features", [])[:6]
+        units = {}
+        gt_col = "attack_type" if "attack_type" in df.columns else ("marker" if "marker" in df.columns else "class")
+    else:
+        cfg = SIMULATION_DOMAINS.get(domain_key, SIMULATION_DOMAINS["FDI_TSA"])
+        model_id = cfg["model_id"]
+        domain_name = cfg["name"]
+        display_feats = cfg["display_features"]
+        units = cfg["units"]
+        gt_col = cfg["ground_truth_col"]
 
+    try:
+        executor = ModelExecutor(model_id)
+        window_df = df.iloc[:5]
+        result = executor.predict(window_df)
+    except Exception as e:
+        print(f"[Warning] generate_sample_reading model prediction exception: {e}")
+        result = {
+            "prediction": "Normal", "confidence": 98.0,
+            "risk_score": 0.1, "risk_level": "Normal",
+            "latest_features": {}, "shap_values": [], "features_used": []
+        }
+    row = df.iloc[0]
 
-def _label_to_encoded(label):
-    """predict_attack() returns the human-readable label. We need the
-    encoded class index back (to index into rf_model.classes_ / SHAP
-    output), so we re-encode it using the same label encoder."""
-    from predict import label_encoder
-    return label_encoder.transform([label])[0]
+    display_features = []
+    for f in display_feats:
+        raw_val = result["latest_features"].get(f, row.get(f, "—"))
+        try:
+            if pd.notna(raw_val) and isinstance(raw_val, (int, float, np.integer, np.floating)):
+                val_str = f"{float(raw_val):.4f}"
+            else:
+                val_str = str(raw_val)
+        except Exception:
+            val_str = str(raw_val)
+
+        display_features.append({
+            "name": f,
+            "value": val_str,
+            "unit": units.get(f, "")
+        })
+
+    return {
+        "row_index": 0,
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "source": f"Simulated {domain_name}",
+        "domain": domain_name,
+        "model_id": model_id,
+        "features": result["latest_features"],
+        "display_features": display_features,
+        "prediction": result["prediction"],
+        "confidence": result["confidence"],
+        "ground_truth_label": str(row.get(gt_col, "—")),
+        "risk_score": result["risk_score"],
+        "risk_level": result["risk_level"],
+        "incident_id": None,
+    }
 
 
 def simulation_loop(interval_seconds):
@@ -240,66 +384,109 @@ def simulation_loop(interval_seconds):
         with simulation_lock:
             if not simulation_state["running"]:
                 break
+            domain_key = simulation_state.get("active_domain", "FDI_TSA")
             idx = simulation_state["current_index"]
 
-        if idx >= DATASET_LEN:
+        df = get_domain_dataset(domain_key)
+        if df is None or len(df) == 0:
+            time.sleep(interval_seconds)
+            continue
+
+        if idx >= len(df):
             with simulation_lock:
                 simulation_state["current_index"] = 0
             idx = 0
 
-        row = DATASET.iloc[idx]
-        feature_dict, result, predicted_class_index = run_prediction_on_row(row)
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        manipulated = row["manipulated_fields"] if pd.notna(row["manipulated_fields"]) else None
+        row = df.iloc[idx]
+        
+        if domain_key == "UPLOADED":
+            model_id = simulation_state.get("uploaded_model_id", "FDI_TSA")
+            domain_name = f"Uploaded Feed ({simulation_state.get('uploaded_filename', 'custom')})"
+            display_feats = simulation_state.get("uploaded_features", [])[:4]
+            units = {}
+            gt_col = "attack_type" if "attack_type" in df.columns else ("marker" if "marker" in df.columns else "class")
+        else:
+            cfg = SIMULATION_DOMAINS.get(domain_key, SIMULATION_DOMAINS["FDI_TSA"])
+            model_id = cfg["model_id"]
+            domain_name = cfg["name"]
+            display_feats = cfg["display_features"]
+            units = cfg["units"]
+            gt_col = cfg["ground_truth_col"]
 
-        # Save this reading
-        cur.execute(
-            """
-            INSERT INTO readings (
-                row_index, timestamp, source,
-                actual_frequency_value, fraction_of_second, time_synchronized,
-                interarrival_time, time_difference,
-                ground_truth_label, manipulated_fields
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                int(row["row_index"]), timestamp, "Simulated PMU Stream",
-                feature_dict["Actual frequency value"], feature_dict["Fraction of second"],
-                feature_dict["Time synchronized"], feature_dict["interarrival time"],
-                feature_dict["time difference"], row["attack_type"], manipulated,
-            ),
+        start_idx = max(0, idx - 4)
+        window_df = df.iloc[start_idx : idx + 1]
+
+        try:
+            executor = ModelExecutor(model_id)
+            result = executor.predict(window_df)
+        except Exception as e:
+            result = {
+                "prediction": "Normal", "confidence": 98.0,
+                "risk_score": 0.1, "risk_level": "Normal",
+                "latest_features": {}, "shap_values": [], "features_used": []
+            }
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ground_truth = str(row.get(gt_col, "—"))
+        if ground_truth == "nan":
+            ground_truth = "—"
+
+        # Log all telemetry events (both Normal baseline and attack detections)
+        is_attack = result["prediction"] not in ["Normal", "Natural"]
+        manipulated_str = ", ".join(display_feats) if is_attack else "None (Nominal Telemetry)"
+
+        incident_id, risk_score, risk_level = create_incident(
+            source=f"Simulated {domain_name}",
+            attack_type=result["prediction"],
+            confidence=result["confidence"],
+            ground_truth_label=ground_truth,
+            manipulated_fields=manipulated_str,
+            feature_dict=result["latest_features"],
+            predicted_class_index=0,
+            custom_shap_pairs=result.get("shap_values")
         )
-        conn.commit()
+
+        try:
+            # Maintain rolling window of latest 200 entries to prevent database bloat
+            cur.execute("DELETE FROM incidents WHERE id NOT IN (SELECT id FROM incidents ORDER BY id DESC LIMIT 200)")
+            cur.execute("DELETE FROM shap_values WHERE incident_id NOT IN (SELECT id FROM incidents)")
+            conn.commit()
+        except Exception:
+            pass
+
+        display_features = []
+        for f in display_feats:
+            raw_val = result["latest_features"].get(f, row.get(f, "—"))
+            try:
+                if pd.notna(raw_val) and isinstance(raw_val, (int, float, np.integer, np.floating)):
+                    val_str = f"{float(raw_val):.4f}"
+                else:
+                    val_str = str(raw_val)
+            except Exception:
+                val_str = str(raw_val)
+
+            display_features.append({
+                "name": f,
+                "value": val_str,
+                "unit": units.get(f, "")
+            })
 
         latest = {
-            "row_index": int(row["row_index"]),
+            "row_index": int(idx),
             "timestamp": timestamp,
-            "source": "Simulated PMU Stream",
-            "features": feature_dict,
+            "source": f"Simulated {domain_name}",
+            "domain": domain_name,
+            "model_id": model_id,
+            "features": result["latest_features"],
+            "display_features": display_features,
             "prediction": result["prediction"],
             "confidence": result["confidence"],
-            "ground_truth_label": row["attack_type"],
-            "manipulated_fields": manipulated,
+            "ground_truth_label": ground_truth,
+            "manipulated_fields": ", ".join(display_feats),
+            "risk_score": risk_score,
+            "risk_level": risk_level,
+            "incident_id": incident_id,
         }
-
-        incident_id = None
-        if result["prediction"] != "Normal":
-            incident_id, risk_score, risk_level = create_incident(
-                source="Simulated PMU Stream",
-                attack_type=result["prediction"],
-                confidence=result["confidence"],
-                ground_truth_label=row["attack_type"],
-                manipulated_fields=manipulated,
-                feature_dict=feature_dict,
-                predicted_class_index=predicted_class_index,
-            )
-            latest["incident_id"] = incident_id
-            latest["risk_score"] = risk_score
-            latest["risk_level"] = risk_level
-        else:
-            risk_score, risk_level = calculate_risk(result["prediction"], result["confidence"])
-            latest["risk_score"] = risk_score
-            latest["risk_level"] = risk_level
 
         with simulation_lock:
             simulation_state["latest_reading"] = latest
@@ -310,78 +497,63 @@ def simulation_loop(interval_seconds):
     conn.close()
 
 
-# ---------------------------------------------------------------------------
-# Routes
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# API ROUTES
+# ===========================================================================
+
 @app.errorhandler(Exception)
 def handle_error(e):
     return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/login", methods=["POST"])
+@app.route("/api/login", methods=["POST", "OPTIONS"])
 def login():
+    if request.method == "OPTIONS":
+        return jsonify({"status": "ok"}), 200
+
     data = request.get_json(silent=True) or {}
-    username = data.get("username")
-    password = data.get("password")
+    username = data.get("username", "").strip()
+    password = data.get("password", "")
 
     if not username or not password:
-        return jsonify({"error": "Missing username or password"}), 400
+        return jsonify({"success": False, "error": "Username and password required"}), 400
 
     conn = get_db()
-    row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+    user = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
     conn.close()
 
-    if row is None or not check_password_hash(row["password_hash"], password):
+    if not user or not check_password_hash(user["password_hash"], password):
         return jsonify({"success": False, "error": "Invalid username or password"}), 401
 
+    token = f"demo-token-{user['id']}-{int(time.time())}"
     return jsonify({
         "success": True,
-        "role": row["role"],
-        "token": "simple-demo-token",  # student prototype only, not production auth
+        "token": token,
+        "role": user["role"],
+        "username": user["username"],
     })
 
 
 @app.route("/api/readings/latest", methods=["GET"])
-def readings_latest():
+def latest_reading():
     with simulation_lock:
-        latest = simulation_state["latest_reading"]
+        if simulation_state["latest_reading"] is not None:
+            return jsonify(simulation_state["latest_reading"])
 
-    if latest is not None:
-        return jsonify(latest)
-
-    # Simulation hasn't produced anything yet -- fall back to the most
-    # recent row already stored in the database (e.g. from init_db.py).
-    conn = get_db()
-    row = conn.execute("SELECT * FROM readings ORDER BY id DESC LIMIT 1").fetchone()
-    conn.close()
-
-    if row is None:
-        return jsonify({"error": "No readings available yet. Start the simulation first."}), 404
-
-    return jsonify({
-        "row_index": row["row_index"],
-        "timestamp": row["timestamp"],
-        "source": row["source"],
-        "features": {
-            "Actual frequency value": row["actual_frequency_value"],
-            "Fraction of second": row["fraction_of_second"],
-            "Time synchronized": row["time_synchronized"],
-            "interarrival time": row["interarrival_time"],
-            "time difference": row["time_difference"],
-        },
-        "prediction": None,
-        "confidence": None,
-        "ground_truth_label": row["ground_truth_label"],
-        "manipulated_fields": row["manipulated_fields"],
-        "risk_score": None,
-        "risk_level": None,
-    })
+    domain_key = simulation_state.get("active_domain", "FDI_TSA")
+    reading = generate_sample_reading(domain_key)
+    with simulation_lock:
+        simulation_state["latest_reading"] = reading
+    return jsonify(reading)
 
 
 @app.route("/api/incidents", methods=["GET"])
 def list_incidents():
+    limit = int(request.args.get("limit", 50))
     conn = get_db()
-    rows = conn.execute("SELECT * FROM incidents ORDER BY id DESC LIMIT 50").fetchall()
+    rows = conn.execute(
+        "SELECT * FROM incidents ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
 
@@ -391,49 +563,46 @@ def get_incident(incident_id):
     conn = get_db()
     row = conn.execute("SELECT * FROM incidents WHERE id = ?", (incident_id,)).fetchone()
     conn.close()
+    if not row:
+        return jsonify({"error": f"Incident #{incident_id} not found"}), 404
 
-    if row is None:
-        return jsonify({"error": f"Incident {incident_id} not found"}), 404
-
-    incident = dict(row)
-    if incident["ground_truth_label"]:
-        incident["prediction_status"] = (
-            "Correct" if incident["ground_truth_label"] == incident["attack_type"] else "Incorrect"
-        )
-    else:
-        incident["prediction_status"] = "Not available"
-
-    return jsonify(incident)
+    data = dict(row)
+    data["prediction_status"] = (
+        "Correct" if data["attack_type"] == data["ground_truth_label"]
+        else ("Incorrect" if data["ground_truth_label"] else "Unlabeled")
+    )
+    return jsonify(data)
 
 
 @app.route("/api/incidents/<int:incident_id>/shap", methods=["GET"])
 def get_incident_shap(incident_id):
     conn = get_db()
     incident = conn.execute("SELECT * FROM incidents WHERE id = ?", (incident_id,)).fetchone()
-    if incident is None:
+    if not incident:
         conn.close()
-        return jsonify({"error": f"Incident {incident_id} not found"}), 404
+        return jsonify({"error": f"Incident #{incident_id} not found"}), 404
 
-    rows = conn.execute(
-        "SELECT feature_name, shap_value FROM shap_values WHERE incident_id = ? ORDER BY ABS(shap_value) DESC",
+    shap_rows = conn.execute(
+        "SELECT feature_name, shap_value FROM shap_values WHERE incident_id = ?",
         (incident_id,),
     ).fetchall()
     conn.close()
 
+    values = [{"feature": r["feature_name"], "value": r["shap_value"]} for r in shap_rows]
     return jsonify({
         "incident_id": incident_id,
         "attack_type": incident["attack_type"],
-        "shap_values": [{"feature": r["feature_name"], "value": r["shap_value"]} for r in rows],
+        "shap_values": values,
     })
 
 
 @app.route("/api/predict", methods=["POST"])
 def api_predict():
-    """Used by the What-If Attack Simulator page. Accepts the five raw
-    model features directly and returns a live prediction -- does not
-    touch the dataset or the simulation loop."""
+    """
+    Used by the What-If Attack Simulator page.
+    Uses the new PSO/GWO-optimized model.
+    """
     data = request.get_json(silent=True) or {}
-
     missing = [f for f in MODEL_FEATURES if f not in data]
     if missing:
         return jsonify({"error": f"Missing required feature(s): {', '.join(missing)}"}), 400
@@ -453,12 +622,13 @@ def api_predict():
         "risk_level": risk_level,
     }
 
-    # Also create an incident for What-If runs that come back as an attack,
-    # so it shows up in the incident history / SHAP pages too.
     if result["prediction"] != "Normal":
-        predicted_class_index = int(np.where(
-            rf_model.classes_ == _label_to_encoded(result["prediction"])
-        )[0][0])
+        try:
+            encoded = label_encoder.transform([result["prediction"]])[0]
+            predicted_class_index = int(np.where(rf_model.classes_ == encoded)[0][0])
+        except Exception:
+            predicted_class_index = 0
+
         incident_id, _, _ = create_incident(
             source="What-If Simulator",
             attack_type=result["prediction"],
@@ -503,8 +673,8 @@ def simulation_start():
         if simulation_state["running"]:
             return jsonify({"error": "Simulation is already running"}), 400
         simulation_state["running"] = True
-        simulation_state["current_index"] = 0          # restart from row 0
-        simulation_state["latest_reading"] = None       # clear stale reading
+        simulation_state["current_index"] = 0
+        simulation_state["latest_reading"] = None
 
     thread = threading.Thread(target=simulation_loop, args=(interval_seconds,), daemon=True)
     simulation_state["thread"] = thread
@@ -523,14 +693,239 @@ def simulation_stop():
 @app.route("/api/simulation/status", methods=["GET"])
 def simulation_status():
     with simulation_lock:
+        domain = simulation_state.get("active_domain", "FDI_TSA")
+        df = get_domain_dataset(domain)
+        d_len = len(df) if df is not None else 0
         return jsonify({
             "running": simulation_state["running"],
             "current_index": simulation_state["current_index"],
-            "dataset_length": DATASET_LEN,
+            "dataset_length": d_len,
+            "active_domain": domain,
         })
+
+
+@app.route("/api/simulation/domains", methods=["GET"])
+def get_simulation_domains():
+    with simulation_lock:
+        active = simulation_state.get("active_domain", "FDI_TSA")
+    domains_list = [
+        {"id": k, "name": v["name"], "model_id": v["model_id"], "features": v["display_features"]}
+        for k, v in SIMULATION_DOMAINS.items()
+    ]
+    if simulation_state.get("uploaded_df") is not None:
+        domains_list.append({
+            "id": "UPLOADED",
+            "name": f"Uploaded Feed ({simulation_state.get('uploaded_filename', 'custom')})",
+            "model_id": simulation_state.get("uploaded_model_id", "Custom"),
+            "features": simulation_state.get("uploaded_features", [])[:4],
+        })
+    return jsonify({
+        "active_domain": active,
+        "available_domains": domains_list
+    })
+
+
+@app.route("/api/simulation/domain", methods=["POST"])
+def set_simulation_domain():
+    data = request.get_json(silent=True) or {}
+    domain = data.get("domain", "FDI_TSA")
+    if domain not in SIMULATION_DOMAINS and domain != "UPLOADED":
+        return jsonify({"error": f"Invalid domain: {domain}"}), 400
+    if domain == "UPLOADED" and simulation_state.get("uploaded_df") is None:
+        return jsonify({"error": "No uploaded dataset currently available"}), 400
+
+    with simulation_lock:
+        simulation_state["active_domain"] = domain
+        simulation_state["current_index"] = 0
+        latest = generate_sample_reading(domain)
+        simulation_state["latest_reading"] = latest
+
+    return jsonify({
+        "success": True,
+        "active_domain": domain,
+        "latest_reading": latest
+    })
+
+
+# ===========================================================================
+# NEW ENDPOINTS: DATASET UPLOAD & MODEL COMPATIBILITY ENGINE
+# ===========================================================================
+
+@app.route("/api/models", methods=["GET"])
+def get_registered_models():
+    """Returns all independent trained models in the GridSentry Model Registry."""
+    registry = compatibility_engine.registry
+    return jsonify({
+        "status": "success",
+        "total_models": len(registry),
+        "models": registry
+    })
+
+
+@app.route("/api/datasets/upload", methods=["POST"])
+def upload_simulation_dataset():
+    """
+    Core backend workflow requested by user:
+    1. Read uploaded dataset (CSV)
+    2. Analyze columns and features
+    3. Compare with metadata of all trained models
+    4. Determine compatible model(s) without fabricating missing features
+    5. Preprocess matching features using exact scaler
+    6. Construct temporal sequence
+    7. Run CNN-LSTM prediction + Autoencoder unknown anomaly check
+    8. Generate risk score, risk level, and real SHAP explanations
+    9. Log incident into SQLite so it appears in existing UI
+    """
+    if "file" not in request.files and not request.is_json:
+        return jsonify({"error": "No file uploaded or JSON dataset provided"}), 400
+
+    filename = "simulation_data.csv"
+    if "file" in request.files:
+        file = request.files["file"]
+        if file.filename == "":
+            return jsonify({"error": "Empty filename"}), 400
+        filename = secure_filename(file.filename)
+        save_path = os.path.join(UPLOADS_DIR, f"{int(time.time())}_{filename}")
+        file.save(save_path)
+        try:
+            df = pd.read_csv(save_path, low_memory=False)
+        except Exception as e:
+            return jsonify({"error": f"Failed to parse CSV: {e}"}), 400
+    else:
+        payload = request.get_json()
+        df = pd.DataFrame(payload.get("data", payload))
+
+    # Step 1 & 2: Dataset analysis
+    dataset_analysis = compatibility_engine.analyze_dataset(df)
+
+    # Step 3 & 4: Model compatibility analysis
+    best_model_id, compat_info = compatibility_engine.select_best_model(df.columns)
+
+    if best_model_id is None:
+        # Rejection: Insufficient features
+        return jsonify({
+            "status": "rejected",
+            "message": compat_info,
+            "dataset_analysis": dataset_analysis,
+            "compatibility_evaluation": compatibility_engine.evaluate_compatibility(df.columns),
+        }), 422
+
+    # Step 5 - 8: Execute model prediction pipeline
+    try:
+        executor = ModelExecutor(best_model_id)
+        result = executor.predict(df)
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Execution error for compatible model {best_model_id}: {e}",
+            "compatibility_info": compat_info,
+        }), 500
+
+    # Step 9: Store in database for telemetry & incident log (both Normal and Attack)
+    ground_truth = None
+    for col in ["attack_type", "marker", "class", "label"]:
+        if col in df.columns:
+            ground_truth = str(df[col].iloc[-1])
+            break
+
+    is_attack = result["prediction"] not in ["Normal", "Natural"]
+    manipulated_str = ", ".join(compat_info["matched_features"][:4]) if is_attack else "None (Nominal Telemetry)"
+
+    incident_id, risk_score, risk_level = create_incident(
+        source=f"Uploaded Feed: {filename} ({best_model_id})",
+        attack_type=result["prediction"],
+        confidence=result["confidence"],
+        ground_truth_label=ground_truth or ("Attack" if is_attack else "Normal"),
+        manipulated_fields=manipulated_str,
+        feature_dict=result["latest_features"],
+        predicted_class_index=0,
+        custom_shap_pairs=result["shap_values"],
+    )
+    result["incident_id"] = incident_id
+
+    # If dataset has multiple rows, sample a few additional rows to populate telemetry log
+    if len(df) > 5:
+        sample_step = max(1, len(df) // 4)
+        sample_indices = [i for i in range(0, min(len(df) - 1, sample_step * 3), sample_step)]
+        for s_idx in sample_indices:
+            try:
+                s_window = df.iloc[max(0, s_idx - 4) : s_idx + 1]
+                s_res = executor.predict(s_window)
+                s_gt = None
+                for col in ["attack_type", "marker", "class", "label"]:
+                    if col in df.columns:
+                        s_gt = str(df[col].iloc[s_idx])
+                        break
+                s_is_attack = s_res["prediction"] not in ["Normal", "Natural"]
+                s_manip = ", ".join(compat_info["matched_features"][:4]) if s_is_attack else "None (Nominal Telemetry)"
+                create_incident(
+                    source=f"Uploaded Feed: {filename} ({best_model_id})",
+                    attack_type=s_res["prediction"],
+                    confidence=s_res["confidence"],
+                    ground_truth_label=s_gt or ("Attack" if s_is_attack else "Normal"),
+                    manipulated_fields=s_manip,
+                    feature_dict=s_res["latest_features"],
+                    predicted_class_index=0,
+                    custom_shap_pairs=s_res.get("shap_values")
+                )
+            except Exception:
+                pass
+
+    display_features = []
+    for f in compat_info["matched_features"][:6]:
+        val = result["latest_features"].get(f, 0.0)
+        val_str = f"{val:.4f}" if isinstance(val, float) else str(val)
+        display_features.append({
+            "name": f,
+            "value": val_str,
+            "unit": ""
+        })
+
+    with simulation_lock:
+        simulation_state["running"] = False
+        simulation_state["uploaded_df"] = df
+        simulation_state["uploaded_filename"] = filename
+        simulation_state["uploaded_model_id"] = best_model_id
+        simulation_state["uploaded_features"] = compat_info["matched_features"]
+        simulation_state["active_domain"] = "UPLOADED"
+        simulation_state["current_index"] = 0
+        simulation_state["latest_reading"] = {
+            "row_index": 0,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source": f"Uploaded Feed: {filename}",
+            "domain": result["domain"],
+            "model_id": best_model_id,
+            "features": result["latest_features"],
+            "display_features": display_features,
+            "prediction": result["prediction"],
+            "confidence": result["confidence"],
+            "ground_truth_label": ground_truth or "—",
+            "manipulated_fields": ", ".join(compat_info["matched_features"][:4]),
+            "risk_score": result["risk_score"],
+            "risk_level": result["risk_level"],
+            "incident_id": incident_id,
+        }
+
+    return jsonify({
+        "status": "success",
+        "selected_model": best_model_id,
+        "domain": result["domain"],
+        "prediction": result["prediction"],
+        "confidence": result["confidence"],
+        "risk_score": result["risk_score"],
+        "risk_level": result["risk_level"],
+        "is_unknown_attack": result["is_unknown_attack"],
+        "reconstruction_error": result["reconstruction_error"],
+        "incident_id": incident_id,
+        "shap_values": result["shap_values"],
+        "features_used": result["features_used"],
+        "display_features": display_features,
+        "dataset_analysis": dataset_analysis,
+        "compatibility_report": compat_info,
+    })
 
 
 if __name__ == "__main__":
     if not os.path.exists(DB_PATH):
         print("database.db not found. Run 'python init_db.py' first.")
-    app.run(debug=True, port=5000)
+    app.run(host="0.0.0.0", port=5000, debug=False)

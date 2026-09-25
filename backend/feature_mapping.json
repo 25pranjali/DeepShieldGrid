@@ -1,0 +1,143 @@
+{
+  "mappings": {
+    "Actual frequency value": [
+      "actual_frequency_value",
+      "Actual frequency value",
+      "Frequency",
+      "frequency",
+      "Freq",
+      "freq",
+      "R1:F",
+      "R2:F",
+      "R3:F",
+      "R4:F",
+      "grid_frequency"
+    ],
+    "Fraction of second": [
+      "fraction_of_second",
+      "Fraction of second",
+      "FractionOfSecond",
+      "frac_sec",
+      "fraction",
+      "subsecond"
+    ],
+    "Time synchronized": [
+      "time_synchronized",
+      "Time synchronized",
+      "TimeSynchronized",
+      "time_sync",
+      "sync_flag"
+    ],
+    "interarrival time": [
+      "interarrival_time",
+      "interarrival time",
+      "InterarrivalTime",
+      "iat",
+      "packet_interval"
+    ],
+    "time difference": [
+      "time_difference",
+      "time difference",
+      "TimeDifference",
+      "time_diff",
+      "delay",
+      "time_drift"
+    ],
+    "Voltage_Phase_A": [
+      "Voltage_Phase_A",
+      "voltage_phase_a",
+      "VA",
+      "Voltage Phase A",
+      "R1-PM1:V",
+      "threePhaseVMU1"
+    ],
+    "Voltage_Phase_B": [
+      "Voltage_Phase_B",
+      "voltage_phase_b",
+      "VB",
+      "Voltage Phase B",
+      "R1-PM2:V",
+      "threePhaseVMU2"
+    ],
+    "Voltage_Phase_C": [
+      "Voltage_Phase_C",
+      "voltage_phase_c",
+      "VC",
+      "Voltage Phase C",
+      "R1-PM3:V",
+      "threePhaseVMU3"
+    ],
+    "Current_Phase_A": [
+      "Current_Phase_A",
+      "current_phase_a",
+      "IA",
+      "Current Phase A",
+      "R1-PM4:I",
+      "IED4_iA"
+    ],
+    "Current_Phase_B": [
+      "Current_Phase_B",
+      "current_phase_b",
+      "IB",
+      "Current Phase B",
+      "R1-PM5:I",
+      "IED4_iB"
+    ],
+    "Current_Phase_C": [
+      "Current_Phase_C",
+      "current_phase_c",
+      "IC",
+      "Current Phase C",
+      "R1-PM6:I",
+      "IED4_iC"
+    ],
+    "Active_Power": [
+      "Active_Power",
+      "active_power",
+      "P",
+      "real_power",
+      "MW"
+    ],
+    "Reactive_Power": [
+      "Reactive_Power",
+      "reactive_power",
+      "Q",
+      "var_power",
+      "MVAR"
+    ],
+    "Phase_Angle": [
+      "Phase_Angle",
+      "phase_angle",
+      "angle",
+      "R1-PA1:VH"
+    ],
+    "asduType": [
+      "asduType",
+      "asdu_type",
+      "ASDU_Type",
+      "type_id"
+    ],
+    "cot": [
+      "cot",
+      "cause_of_transmission",
+      "COT"
+    ],
+    "ioa": [
+      "ioa",
+      "IOA",
+      "information_object_address"
+    ],
+    "sqNum": [
+      "sqNum",
+      "sq_num",
+      "sequence_number",
+      "seq_num"
+    ],
+    "stnum": [
+      "stnum",
+      "st_num",
+      "state_number",
+      "state_count"
+    ]
+  }
+}

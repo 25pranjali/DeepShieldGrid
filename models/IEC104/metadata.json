@@ -1,0 +1,111 @@
+{
+  "model_id": "IEC104",
+  "domain": "SCADA Telecontrol Protocol (IEC 60870-5-104)",
+  "dataset_name": "data_with_ioa.csv",
+  "attack_classes": [
+    "Command Injection",
+    "Normal",
+    "Telemetry Spoofing"
+  ],
+  "sequence_length": 5,
+  "original_features": [
+    "Relative Time",
+    "srcPort",
+    "dstPort",
+    "ipLen",
+    "len",
+    "fmt",
+    "uType",
+    "asduType",
+    "numix",
+    "cot",
+    "addr",
+    "ioa"
+  ],
+  "pso_selected_features": [
+    "Relative Time"
+  ],
+  "gwo_selected_features": [
+    "Relative Time",
+    "asduType"
+  ],
+  "final_features": [
+    "Relative Time",
+    "srcPort",
+    "dstPort",
+    "ipLen",
+    "len",
+    "fmt",
+    "uType",
+    "asduType",
+    "numix",
+    "cot",
+    "addr",
+    "ioa"
+  ],
+  "minimum_compatible_features": [
+    "asduType",
+    "cot",
+    "ioa"
+  ],
+  "evaluation": {
+    "accuracy": 75.81,
+    "macro_precision": 75.66,
+    "macro_recall": 77.55,
+    "macro_f1": 76.23,
+    "weighted_f1": 75.17,
+    "confusion_matrix": [
+      [
+        391,
+        181,
+        0
+      ],
+      [
+        150,
+        485,
+        115
+      ],
+      [
+        0,
+        2,
+        528
+      ]
+    ],
+    "per_class_report": {
+      "Command Injection": {
+        "precision": 0.722735674676525,
+        "recall": 0.6835664335664335,
+        "f1-score": 0.7026055705300989,
+        "support": 572.0
+      },
+      "Normal": {
+        "precision": 0.7260479041916168,
+        "recall": 0.6466666666666666,
+        "f1-score": 0.6840620592383639,
+        "support": 750.0
+      },
+      "Telemetry Spoofing": {
+        "precision": 0.8211508553654744,
+        "recall": 0.9962264150943396,
+        "f1-score": 0.9002557544757033,
+        "support": 530.0
+      },
+      "accuracy": 0.7580993520518359,
+      "macro avg": {
+        "precision": 0.7566448114112054,
+        "recall": 0.7754865051091467,
+        "f1-score": 0.7623077947480553,
+        "support": 1852.0
+      },
+      "weighted avg": {
+        "precision": 0.7522411919019365,
+        "recall": 0.7580993520518359,
+        "f1-score": 0.7516590068272744,
+        "support": 1852.0
+      }
+    },
+    "training_time_seconds": 28.92,
+    "inference_time_ms_per_sample": 0.0701,
+    "autoencoder_reconstruction_threshold": 0.36295
+  }
+}

@@ -7,6 +7,8 @@
   --text-dim: #8CA0B8;
   --cyan: #45D6C7;
   --cyan-dim: rgba(69, 214, 199, 0.12);
+  --green: #10B981;
+  --green-dim: rgba(16, 185, 129, 0.16);
   --amber: #F0A83C;
   --amber-dim: rgba(240, 168, 60, 0.14);
   --red: #E5525C;
@@ -379,8 +381,8 @@ main.content {
 }
 
 .status-banner.normal {
-  background: var(--cyan-dim);
-  border: 1px solid rgba(69, 214, 199, 0.3);
+  background: var(--green-dim);
+  border: 1px solid rgba(16, 185, 129, 0.35);
 }
 
 .status-banner .pulse {
@@ -393,9 +395,9 @@ main.content {
 }
 
 .status-banner.normal .pulse {
-  background: var(--cyan);
+  background: var(--green);
   animation: none;
-  box-shadow: 0 0 8px var(--cyan);
+  box-shadow: 0 0 8px var(--green);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -518,6 +520,10 @@ main.content {
   margin-top: 10px;
 }
 
+.risk-level.normal {
+  color: var(--green);
+}
+
 .risk-level.low {
   color: var(--cyan);
 }
@@ -576,14 +582,30 @@ table.log-table tr.clickable:hover {
   border-radius: 20px;
 }
 
+.badge.critical,
 .badge.attack {
   background: var(--red-dim);
   color: var(--red);
 }
 
-.badge.normal {
+.badge.high {
+  background: rgba(229, 82, 92, 0.20);
+  color: #F87171;
+}
+
+.badge.medium {
+  background: var(--amber-dim);
+  color: var(--amber);
+}
+
+.badge.low {
   background: var(--cyan-dim);
   color: var(--cyan);
+}
+
+.badge.normal {
+  background: var(--green-dim);
+  color: var(--green);
 }
 
 .empty-row td {
@@ -1009,3 +1031,34 @@ table.log-table tr.clickable:hover {
     padding: 20px;
   }
 }
+
+/* Filter pills for Telemetry & Incident Log */
+.filter-pills {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.pill-btn {
+  background: var(--panel-2);
+  color: var(--text-dim);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 4px 11px;
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.pill-btn:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
+}
+
+.pill-btn.active {
+  background: var(--cyan-dim);
+  color: var(--cyan);
+  border-color: var(--cyan);
+  font-weight: 600;
+}

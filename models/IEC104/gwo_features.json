@@ -1,0 +1,29 @@
+{
+  "algorithm": "GWO",
+  "original_feature_count": 12,
+  "selected_feature_count": 2,
+  "selected_features": [
+    "Relative Time",
+    "asduType"
+  ],
+  "selected_indices": [
+    0,
+    7
+  ],
+  "best_fitness": 0.0422,
+  "validation_macro_f1": 0.9717,
+  "optimization_time_seconds": 2.29,
+  "fitness_history": [
+    0.054240824500119786,
+    0.04217745680071581,
+    0.04217745680071581,
+    0.04217745680071581,
+    0.04217745680071581,
+    0.04217745680071581,
+    0.04217745680071581,
+    0.04217745680071581,
+    0.04217745680071581,
+    0.04217745680071581,
+    0.04217745680071581
+  ]
+}

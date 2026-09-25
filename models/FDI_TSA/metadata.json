@@ -1,0 +1,97 @@
+{
+  "model_id": "FDI_TSA",
+  "domain": "PMU Synchrophasor (IEEE C37.118)",
+  "dataset_name": "Clean_FDI_TSA_Combined.csv",
+  "attack_classes": [
+    "FDI",
+    "Normal",
+    "TSA"
+  ],
+  "sequence_length": 5,
+  "original_features": [
+    "Actual frequency value",
+    "Fraction of second",
+    "Time synchronized",
+    "interarrival time",
+    "time difference"
+  ],
+  "pso_selected_features": [
+    "Actual frequency value",
+    "interarrival time",
+    "time difference"
+  ],
+  "gwo_selected_features": [
+    "Actual frequency value",
+    "interarrival time",
+    "time difference"
+  ],
+  "final_features": [
+    "Actual frequency value",
+    "interarrival time",
+    "time difference"
+  ],
+  "minimum_compatible_features": [
+    "Actual frequency value",
+    "interarrival time"
+  ],
+  "evaluation": {
+    "accuracy": 97.73,
+    "macro_precision": 97.84,
+    "macro_recall": 97.73,
+    "macro_f1": 97.73,
+    "weighted_f1": 97.73,
+    "confusion_matrix": [
+      [
+        2811,
+        188,
+        0
+      ],
+      [
+        16,
+        2984,
+        0
+      ],
+      [
+        0,
+        0,
+        3000
+      ]
+    ],
+    "per_class_report": {
+      "FDI": {
+        "precision": 0.9943402900601345,
+        "recall": 0.9373124374791597,
+        "f1-score": 0.964984552008239,
+        "support": 2999.0
+      },
+      "Normal": {
+        "precision": 0.9407313997477932,
+        "recall": 0.9946666666666667,
+        "f1-score": 0.9669475048606611,
+        "support": 3000.0
+      },
+      "TSA": {
+        "precision": 1.0,
+        "recall": 1.0,
+        "f1-score": 1.0,
+        "support": 3000.0
+      },
+      "accuracy": 0.9773308145349483,
+      "macro avg": {
+        "precision": 0.978357229935976,
+        "recall": 0.9773263680486087,
+        "f1-score": 0.9773106856229666,
+        "support": 8999.0
+      },
+      "weighted avg": {
+        "precision": 0.9783554538430628,
+        "recall": 0.9773308145349483,
+        "f1-score": 0.9773120553455599,
+        "support": 8999.0
+      }
+    },
+    "training_time_seconds": 152.74,
+    "inference_time_ms_per_sample": 0.0682,
+    "autoencoder_reconstruction_threshold": 3.12206
+  }
+}

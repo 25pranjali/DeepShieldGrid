@@ -1,0 +1,27 @@
+{
+  "algorithm": "PSO",
+  "original_feature_count": 12,
+  "selected_feature_count": 1,
+  "selected_features": [
+    "Relative Time"
+  ],
+  "selected_indices": [
+    0
+  ],
+  "best_fitness": 0.0398,
+  "validation_macro_f1": 0.965,
+  "optimization_time_seconds": 2.72,
+  "fitness_history": [
+    0.0497628042537995,
+    0.04292188200556782,
+    0.04292188200556782,
+    0.04292188200556782,
+    0.04292188200556782,
+    0.04292188200556782,
+    0.04217745680071581,
+    0.04217745680071581,
+    0.04217745680071581,
+    0.03981025835607501,
+    0.03981025835607501
+  ]
+}
