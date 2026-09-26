@@ -8,3 +8,4 @@ shap>=0.45.0
 Werkzeug>=3.0.3
 torch>=2.0.0
 kagglehub>=1.0.0
+fpdf2>=2.8.0

@@ -130,6 +130,15 @@ function goToShapForCurrentIncident() {
   showPage("shap", btn);
 }
 
+function downloadIncidentReport() {
+  if (currentIncidentId == null) {
+    alert("Select an incident before downloading its report.");
+    return;
+  }
+
+  window.open(`${API_BASE}/api/incidents/${currentIncidentId}/report`, "_blank");
+}
+
 // ---------------------------------------------------------------------------
 // Dashboard
 // ---------------------------------------------------------------------------

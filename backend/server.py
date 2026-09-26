@@ -20,7 +20,8 @@ from datetime import datetime
 
 import numpy as np
 import pandas as pd
-from flask import Flask, request, jsonify
+from fpdf import FPDF
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.security import check_password_hash
 from werkzeug.utils import secure_filename
@@ -594,6 +595,214 @@ def get_incident_shap(incident_id):
         "attack_type": incident["attack_type"],
         "shap_values": values,
     })
+
+
+@app.route("/api/incidents/<int:incident_id>/report", methods=["GET"])
+def download_incident_report(incident_id):
+    """Create a downloadable PDF summary for one stored incident."""
+    conn = get_db()
+    incident = conn.execute(
+        "SELECT * FROM incidents WHERE id = ?", (incident_id,)
+    ).fetchone()
+    if not incident:
+        conn.close()
+        return jsonify({"error": f"Incident {incident_id} not found"}), 404
+
+    shap_rows = conn.execute(
+        """
+        SELECT feature_name, shap_value
+        FROM shap_values
+        WHERE incident_id = ?
+        ORDER BY ABS(shap_value) DESC
+        """,
+        (incident_id,),
+    ).fetchall()
+    conn.close()
+
+    incident = dict(incident)
+    ground_truth = incident.get("ground_truth_label")
+    if ground_truth is None or not str(ground_truth).strip() or str(ground_truth).strip() in ("—", "-"):
+        prediction_status = "Not available"
+    elif str(incident.get("attack_type", "")).strip().casefold() == str(ground_truth).strip().casefold():
+        prediction_status = "Correct"
+    else:
+        prediction_status = "Incorrect"
+
+    generated_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def pdf_text(value):
+        """Keep database text safe for FPDF's built-in Latin-1 font."""
+        return str(value if value is not None else "Not available").encode(
+            "latin-1", "replace"
+        ).decode("latin-1")
+
+    teal = (0, 137, 121)
+    navy = (47, 59, 79)
+    ink = (46, 53, 63)
+    muted = (103, 111, 121)
+    border = (198, 203, 208)
+    pale = (246, 247, 248)
+    teal_pale = (229, 243, 240)
+    white = (255, 255, 255)
+    content_width = 186
+
+    class IncidentReportPDF(FPDF):
+        def header(self):
+            # Repeat the reference's teal title band and navy framing on each page.
+            self.set_fill_color(*navy)
+            self.rect(0, 0, self.w, 5, "F")
+            self.set_xy(self.l_margin, 10)
+            self.set_fill_color(*teal)
+            self.set_text_color(*white)
+            self.set_font("Helvetica", "B", 14)
+            self.cell(content_width, 14, "GRIDSENTRY INCIDENT REPORT", align="C", fill=True)
+            self.set_fill_color(*navy)
+            self.rect(0, 27, self.w, 3, "F")
+
+            self.set_y(34)
+            self.set_text_color(*muted)
+            self.set_font("Helvetica", "B", 8)
+            self.cell(0, 5, "GRID CYBERSECURITY  |  DETECTION RECORD", align="C", new_x="LMARGIN", new_y="NEXT")
+            self.set_text_color(*navy)
+            self.set_font("Times", size=22)
+            self.cell(0, 11, "Incident Report", align="C", new_x="LMARGIN", new_y="NEXT")
+            self.set_text_color(*muted)
+            self.set_font("Helvetica", size=8)
+            self.cell(0, 5, f"Generated: {generated_at}", align="C", new_x="LMARGIN", new_y="NEXT")
+            self.set_draw_color(132, 87, 103)
+            self.set_line_width(1)
+            self.line(self.l_margin, 61, self.w - self.r_margin, 61)
+            self.set_line_width(0.2)
+            self.set_y(67)
+
+        def footer(self):
+            self.set_fill_color(*navy)
+            self.rect(0, self.h - 5, self.w, 5, "F")
+            self.set_y(-17)
+            self.set_text_color(*muted)
+            self.set_font("Helvetica", size=8)
+            self.multi_cell(
+                0,
+                4,
+                "This report reflects a simulated detection from the GridSentry "
+                "prototype. No real grid control action was performed.",
+                align="C",
+                new_x="LMARGIN",
+                new_y="NEXT",
+            )
+
+    pdf = IncidentReportPDF()
+    pdf.set_margins(12, 12, 12)
+    pdf.set_auto_page_break(auto=True, margin=23)
+    pdf.add_page()
+
+    def draw_section_heading(title):
+        pdf.set_fill_color(*navy)
+        pdf.set_text_color(*white)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.cell(0, 7, pdf_text(title.upper()), fill=True, new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(2)
+
+    draw_section_heading("Incident summary")
+    label_width = 47
+    value_width = content_width - label_width
+    summary_fields = [
+        ("ID", incident.get("id")),
+        ("Timestamp", incident.get("timestamp")),
+        ("Source", incident.get("source")),
+        ("Attack type", incident.get("attack_type")),
+        ("Confidence", f"{incident.get('confidence')}%" if incident.get("confidence") is not None else None),
+        ("Risk level", incident.get("risk_level")),
+        ("Ground truth label", ground_truth),
+        ("Manipulated field(s)", incident.get("manipulated_fields")),
+        ("Prediction status", prediction_status),
+    ]
+    for index, (label, value) in enumerate(summary_fields):
+        start_x = pdf.l_margin
+        start_y = pdf.get_y()
+        pdf.set_xy(start_x + label_width, start_y)
+        pdf.set_font("Helvetica", size=9)
+        pdf.set_text_color(*ink)
+        pdf.set_fill_color(*pale)
+        pdf.multi_cell(
+            value_width,
+            6,
+            pdf_text(value),
+            border="TRB",
+            fill=True,
+            new_x="LMARGIN",
+            new_y="NEXT",
+        )
+        row_height = max(8, pdf.get_y() - start_y)
+        pdf.set_xy(start_x, start_y)
+        pdf.set_font("Helvetica", "B", 8)
+        pdf.set_text_color(*teal)
+        pdf.set_fill_color(*(teal_pale if index % 2 == 0 else pale))
+        pdf.cell(label_width, row_height, pdf_text(label.upper()), border="LTRB", fill=True)
+        pdf.set_xy(start_x, start_y + row_height)
+
+    pdf.ln(5)
+    draw_section_heading("SHAP feature contributions")
+
+    def draw_shap_table_header():
+        pdf.set_fill_color(*teal)
+        pdf.set_text_color(*white)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.cell(126, 8, "Feature name", border=1, fill=True)
+        pdf.cell(60, 8, "Contribution value", border=1, fill=True, new_x="LMARGIN", new_y="NEXT")
+
+    draw_shap_table_header()
+    feature_width = 126
+    value_column_width = content_width - feature_width
+    if not shap_rows:
+        pdf.set_fill_color(*pale)
+        pdf.set_text_color(*muted)
+        pdf.set_font("Helvetica", size=9)
+        pdf.cell(content_width, 9, "No SHAP contributions are available for this incident.", border=1, fill=True)
+    for index, shap_row in enumerate(shap_rows):
+        if pdf.get_y() + 13 > pdf.h - pdf.b_margin:
+            pdf.add_page()
+            draw_section_heading("SHAP feature contributions (continued)")
+            draw_shap_table_header()
+
+        start_x = pdf.l_margin
+        start_y = pdf.get_y()
+        pdf.set_xy(start_x, start_y)
+        pdf.set_font("Helvetica", size=9)
+        pdf.set_text_color(*ink)
+        pdf.set_fill_color(*(pale if index % 2 == 0 else white))
+        pdf.multi_cell(
+            feature_width,
+            7,
+            pdf_text(shap_row["feature_name"]),
+            border="LRB",
+            fill=True,
+            new_x="LMARGIN",
+            new_y="NEXT",
+        )
+        row_height = max(8, pdf.get_y() - start_y)
+        pdf.set_xy(start_x + feature_width, start_y)
+        pdf.set_font("Helvetica", size=9)
+        pdf.set_text_color(*ink)
+        pdf.set_fill_color(*(pale if index % 2 == 0 else white))
+        pdf.cell(
+            value_column_width,
+            row_height,
+            f"{shap_row['shap_value']:.6f}",
+            border="LTRB",
+            fill=True,
+            align="R",
+        )
+        pdf.set_xy(start_x, start_y + row_height)
+
+    pdf_output = io.BytesIO(pdf.output())
+    pdf_output.seek(0)
+    return send_file(
+        pdf_output,
+        mimetype="application/pdf",
+        as_attachment=True,
+        download_name=f"gridsentry_incident_{incident_id}.pdf",
+    )
 
 
 @app.route("/api/predict", methods=["POST"])
