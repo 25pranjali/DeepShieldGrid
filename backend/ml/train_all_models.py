@@ -1,7 +1,7 @@
 """
 train_all_models.py
 
-Master multi-dataset training pipeline for GridSentry:
+Master multi-dataset training pipeline for DeepShieldGrid:
 Trains 4 INDEPENDENT models without merging datasets:
 1. FDI_TSA_Model (PMU Synchrophasor IEEE C37.118: Normal, FDI, TSA)
 2. MSU_ORNL_Model (Transmission Line Protection: Natural, Attack)
@@ -784,7 +784,7 @@ def train_iec61850_pipeline():
 # ===========================================================================
 def train_all():
     print("=" * 80)
-    print("STARTING GRIDSENTRY MULTI-DATASET INDEPENDENT TRAINING")
+    print("STARTING DEEPSHIELDGRID MULTI-DATASET INDEPENDENT TRAINING")
     print("=" * 80)
 
     registry = {}

@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>GridSentry — Smart Grid Attack Detection</title>
+  <title>DeepShieldGrid — Smart Grid Attack Detection</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link
@@ -18,7 +18,7 @@
   <!-- ================= LOGIN ================= -->
   <div id="login">
     <div class="login-card">
-      <div class="login-brand"><span class="dot"></span><span>GridSentry</span></div>
+      <div class="login-brand"><span class="dot"></span><span>DeepShieldGrid</span></div>
       <h1>Sign in</h1>
       <p class="sub">Smart grid attack detection prototype — FDI / Normal / TSA classification.</p>
 
@@ -42,7 +42,7 @@
   <!-- ================= APP ================= -->
   <div id="app">
     <aside class="sidebar">
-      <div class="brand"><span class="dot"></span><span>GridSentry</span></div>
+      <div class="brand"><span class="dot"></span><span>DeepShieldGrid</span></div>
 
       <button class="nav-item active" onclick="showPage('dashboard', this)">
         <span class="ic">◧</span> Dashboard
@@ -101,6 +101,8 @@
           </div>
         </div>
 
+        <div class="sim-status-text" id="responseStatusLine" style="margin: 8px 0 14px 2px;"></div>
+
         <div class="grid-4" id="telemetryGrid">
           <div class="card">
             <h3 id="featTitle0">Actual frequency value</h3>
@@ -132,7 +134,7 @@
             </div>
             <div class="kv-row"><span class="k">Predicted class</span><span class="v" id="predClass">—</span></div>
             <div class="kv-row"><span class="k">Confidence</span><span class="v" id="predConfidence">—</span></div>
-            <div class="kv-row"><span class="k">Ground truth (dataset label)</span><span class="v"
+            <div class="kv-row"><span class="k">Mitigation Status</span><span class="v"
                 id="predGroundTruth">—</span></div>
             <div class="kv-row"><span class="k">Active Domain / Protocol</span><span class="v" id="predDomain">PMU Synchrophasor (IEEE C37.118)</span>
             </div>
@@ -142,7 +144,10 @@
             <h3 style="align-self:flex-start;">Risk Score</h3>
             <div class="readout" id="riskScoreNum" style="font-size:34px; margin-top:10px;">—</div>
             <div class="risk-level" id="riskLevelText">—</div>
-            <div class="risk-sub">based on model confidence and predicted class</div>
+            <div id="dashRiskActionsPill" style="font-size:11.5px; font-weight:600; margin-top:8px; padding:4px 10px; border-radius:6px; background:var(--panel-2); color:var(--text-dim); text-align:center;">
+              Action: Routine Monitoring
+            </div>
+            <div class="risk-sub" style="margin-top:6px;">Automated containment triggered on elevated risk</div>
           </div>
         </div>
 
@@ -210,38 +215,135 @@
               <div class="kv-row"><span class="k">Risk level</span><span class="v" id="detRiskLevel">—</span></div>
             </div>
 
-            <div class="card">
-              <h3 style="margin-bottom:12px;">Predicted vs. actual (ground truth)</h3>
-              <div class="compare-row">
-                <div class="compare-box" id="gtBox">
-                  <div class="lbl">Ground truth</div>
-                  <div class="val" id="detGroundTruth">—</div>
+            <div class="card" id="riskActionsCard">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                <h3 style="margin:0;">Risk Impact & Automated Actions</h3>
+                <span id="detContainmentBadge" class="status-pill active-containment">CONTAINMENT ACTIVE</span>
+              </div>
+
+              <!-- Risk Severity Meter -->
+              <div class="risk-gauge-container">
+                <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:6px;">
+                  <span style="font-size:11.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.5px; font-weight:600;">Calculated Cyber Risk</span>
+                  <div style="display:flex; align-items:center;">
+                    <span id="detRiskScoreNum" style="font-size:22px; font-weight:700; color:var(--text);">—</span>
+                    <span style="font-size:12.5px; color:var(--text-dim); margin-right:8px;"> / 100</span>
+                    <span id="detRiskLevelPill" class="risk-level-badge medium">Medium</span>
+                  </div>
                 </div>
-                <div class="compare-box" id="predBox">
-                  <div class="lbl">Model predicted</div>
-                  <div class="val" id="detPrediction">—</div>
+                <div class="risk-meter-bar">
+                  <div class="risk-meter-fill medium" id="detRiskMeterFill" style="width: 65%;"></div>
                 </div>
               </div>
-              <p style="font-size:12.5px; color:var(--text-dim); margin-top:14px; line-height:1.6;" id="detStatusNote">
-                Prediction status: <span id="detStatus">—</span>
-              </p>
+
+              <!-- Operational Grid Threat -->
+              <div class="threat-impact-box" id="detThreatImpactBox" style="margin-top:12px;">
+                <div style="display:flex; align-items:center; gap:6px; margin-bottom:4px;">
+                  <span style="color:var(--amber); font-size:13px;" id="detThreatIcon">⚡</span>
+                  <span style="font-size:11.5px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; color:var(--text);" id="detThreatTitle">Grid Threat & Operational Impact</span>
+                </div>
+                <p id="detThreatImpactText" style="font-size:12px; color:var(--text-dim); line-height:1.45; margin:0;">
+                  Analyzing operational impact on smart grid infrastructure...
+                </p>
+              </div>
+
+              <!-- Actions Taken Checklist -->
+              <div class="risk-actions-list" style="margin-top:12px;">
+                <div style="font-size:11.5px; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-dim); margin-bottom:6px;">
+                  Automated Actions Enforced for this Risk:
+                </div>
+                <div class="action-row">
+                  <span class="action-bullet">🛡️</span>
+                  <div class="action-info">
+                    <span class="action-title">Data Quarantine:</span>
+                    <span class="action-status-text" id="detActQuarantine">Packet quarantined; excluded from state estimation</span>
+                  </div>
+                </div>
+                <div class="action-row">
+                  <span class="action-bullet">🔄</span>
+                  <div class="action-info">
+                    <span class="action-title">Data Fallback:</span>
+                    <span class="action-status-text" id="detActFallback">Switched to last validated healthy reading</span>
+                  </div>
+                </div>
+                <div class="action-row">
+                  <span class="action-bullet">🔒</span>
+                  <div class="action-info">
+                    <span class="action-title">Source Isolation:</span>
+                    <span class="action-status-text" id="detActIsolation">Source isolated for 5 cycles (prevent cascading errors)</span>
+                  </div>
+                </div>
+                <div class="action-row">
+                  <span class="action-bullet">📈</span>
+                  <div class="action-info">
+                    <span class="action-title">Surveillance Rate:</span>
+                    <span class="action-status-text" id="detActMonitoring">Sampling frequency accelerated to 0.3s</span>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
           <div class="card" style="margin-bottom:20px;">
             <h3 style="margin-bottom:8px;">Automated response (simulated)</h3>
             <span class="sim-only-label">Simulation only — no real grid control is performed</span>
-            <div class="response-flow">
-              <div class="response-step"><span class="step-num">1</span><span class="step-txt">Quarantine suspicious
-                  reading</span></div>
-              <div class="response-step"><span class="step-num">2</span><span class="step-txt">Switch to trusted /
-                  fallback data</span></div>
-              <div class="response-step"><span class="step-num">3</span><span class="step-txt">Increase monitoring
-                  frequency</span></div>
-              <div class="response-step"><span class="step-num">4</span><span class="step-txt">Generate alert to
-                  operator</span></div>
-              <div class="response-step"><span class="step-num">5</span><span class="step-txt">Log incident for forensic
-                  audit</span></div>
+            <div class="response-flow" id="responseFlowContainer"></div>
+          </div>
+
+          <!-- Interactive Enforcement Evidence Card -->
+          <div class="card" id="enforcementEvidenceCard" style="margin-bottom:20px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:8px;">
+              <div>
+                <h3 style="margin:0;">Enforcement Evidence & State Estimator Protection</h3>
+                <span class="tag" style="font-size:11.5px; color:var(--text-dim);">Live proof of quarantine, fallback routing & database audit trail</span>
+              </div>
+              <button class="btn-secondary" id="btnVerifyDb" style="padding:5px 12px; font-size:12px;" onclick="verifyDatabaseEnforcement()">
+                🔍 Verify SQLite Database Record
+              </button>
+            </div>
+
+            <!-- Side-by-side Telemetry Routing: Ingested vs Grid Dispatched -->
+            <div class="telemetry-route-grid">
+              <div class="route-box route-blocked">
+                <div class="route-header">
+                  <span class="route-badge blocked">❌ Ingested Telemetry (BLOCKED)</span>
+                  <span class="route-sub">Ingestion Boundary Filter</span>
+                </div>
+                <div class="route-metrics" id="blockedMetricsList">
+                  <!-- Populated by JS with incoming malicious values -->
+                </div>
+                <div class="route-footer">
+                  Action: Flagged untrusted and quarantined. Excluded from Weighted Least Squares (WLS) state estimator to prevent incorrect control decisions.
+                </div>
+              </div>
+
+              <div class="route-arrow">➔</div>
+
+              <div class="route-box route-passed">
+                <div class="route-header">
+                  <span class="route-badge passed">🛡️ Dispatched to Grid (PROTECTED)</span>
+                  <span class="route-sub">State Estimator & AGC Input</span>
+                </div>
+                <div class="route-metrics" id="dispatchedMetricsList">
+                  <!-- Populated by JS with safe fallback baseline values -->
+                </div>
+                <div class="route-footer">
+                  Action: Last validated healthy baseline substituted. Grid frequency, phase angles, and voltages remain within nominal operating tolerances.
+                </div>
+              </div>
+            </div>
+
+            <!-- Database Audit Row Evidence -->
+            <div class="db-audit-proof" style="margin-top:14px; padding:10px 14px; background:var(--panel-2); border-radius:6px; border:1px solid var(--line);">
+              <div style="font-size:11px; font-weight:600; text-transform:uppercase; color:var(--text-dim); margin-bottom:8px; letter-spacing:0.5px;">
+                Verified SQLite Database Records for this Incident:
+              </div>
+              <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(220px, 1fr)); gap:10px; font-size:12px;" id="dbProofFields">
+                <div><span style="color:var(--text-dim);">readings.is_quarantined:</span> <strong id="proofQuarantine" style="color:var(--text);">—</strong></div>
+                <div><span style="color:var(--text-dim);">incidents.source_isolated:</span> <strong id="proofIsolated" style="color:var(--text);">—</strong></div>
+                <div><span style="color:var(--text-dim);">sources.isolated_until:</span> <strong id="proofUntilRow" style="color:var(--text);">—</strong></div>
+                <div><span style="color:var(--text-dim);">incidents.response_log:</span> <strong id="proofResponseLog" style="color:var(--text); font-family:monospace; font-size:11px;">—</strong></div>
+              </div>
             </div>
           </div>
 

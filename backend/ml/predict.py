@@ -1,7 +1,7 @@
 """
 predict.py
 
-Primary inference engine for GridSentry:
+Primary inference engine for DeepShieldGrid:
 - Powered by the newly trained PSO/GWO-optimized 1D-CNN + BiLSTM model
 - Seamlessly falls back to companion calibrated ensemble for single-row / cold-start
 - Detects the 3 clean PMU classes: Normal, FDI, TSA

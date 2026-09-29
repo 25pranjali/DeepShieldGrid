@@ -12,6 +12,7 @@ Usage:
 """
 
 import os
+import json
 import sqlite3
 from werkzeug.security import generate_password_hash
 
@@ -40,7 +41,8 @@ CREATE TABLE IF NOT EXISTS readings (
     interarrival_time REAL,
     time_difference REAL,
     ground_truth_label TEXT,
-    manipulated_fields TEXT
+    manipulated_fields TEXT,
+    is_quarantined INTEGER DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS incidents (
@@ -52,7 +54,9 @@ CREATE TABLE IF NOT EXISTS incidents (
     risk_score REAL,
     risk_level TEXT,
     ground_truth_label TEXT,
-    manipulated_fields TEXT
+    manipulated_fields TEXT,
+    source_isolated INTEGER DEFAULT 0,
+    response_log TEXT
 );
 
 CREATE TABLE IF NOT EXISTS shap_values (
@@ -62,33 +66,103 @@ CREATE TABLE IF NOT EXISTS shap_values (
     shap_value REAL,
     FOREIGN KEY (incident_id) REFERENCES incidents(id)
 );
+
+CREATE TABLE IF NOT EXISTS sources (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_name TEXT UNIQUE NOT NULL,
+    is_isolated INTEGER DEFAULT 0,
+    isolated_until_row INTEGER,
+    last_trusted_reading TEXT
+);
 """
 
 
 DROP_SCHEMA = """
+DROP TABLE IF EXISTS sources;
 DROP TABLE IF EXISTS shap_values;
 DROP TABLE IF EXISTS incidents;
 DROP TABLE IF EXISTS readings;
 DROP TABLE IF EXISTS users;
 """
 
-def create_database():
-    conn = sqlite3.connect(DB_PATH)
-    conn.executescript(DROP_SCHEMA)
-    conn.executescript(SCHEMA)
+
+def migrate_database(conn):
+    """
+    Migration helper function:
+    Checks if existing tables are missing newly added columns and adds them using
+    ALTER TABLE ... ADD COLUMN so existing database.db files upgrade automatically
+    without dropping data or breaking existing records.
+    Also ensures the 'sources' table is created and initialized.
+    """
+    cur = conn.cursor()
+
+    # 1. Check readings table columns (add is_quarantined if missing)
+    cur.execute("PRAGMA table_info(readings)")
+    reading_cols = [row[1] for row in cur.fetchall()]
+    if reading_cols and "is_quarantined" not in reading_cols:
+        cur.execute("ALTER TABLE readings ADD COLUMN is_quarantined INTEGER DEFAULT 0")
+        print("Migration: Added 'is_quarantined' column to readings table.")
+
+    # 2. Check incidents table columns (add source_isolated and response_log if missing)
+    cur.execute("PRAGMA table_info(incidents)")
+    incident_cols = [row[1] for row in cur.fetchall()]
+    if incident_cols:
+        if "source_isolated" not in incident_cols:
+            cur.execute("ALTER TABLE incidents ADD COLUMN source_isolated INTEGER DEFAULT 0")
+            print("Migration: Added 'source_isolated' column to incidents table.")
+        if "response_log" not in incident_cols:
+            cur.execute("ALTER TABLE incidents ADD COLUMN response_log TEXT")
+            print("Migration: Added 'response_log' column to incidents table.")
+
+    # 3. Create sources table if not exists
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS sources (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_name TEXT UNIQUE NOT NULL,
+        is_isolated INTEGER DEFAULT 0,
+        isolated_until_row INTEGER,
+        last_trusted_reading TEXT
+    );
+    """)
+
+    # 4. Insert one starting row for 'Simulated PMU Stream' if not already present
+    cur.execute("""
+    INSERT OR IGNORE INTO sources (source_name, is_isolated)
+    VALUES ('Simulated PMU Stream', 0);
+    """)
+
     conn.commit()
+
+
+def create_database(force_reset=False):
+    db_exists = os.path.exists(DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
+    if force_reset or not db_exists:
+        conn.executescript(DROP_SCHEMA)
+        conn.executescript(SCHEMA)
+        conn.commit()
+        insert_demo_user(conn)
+        insert_sample_readings(conn)
+        insert_sample_incident(conn)
+        conn.execute("INSERT OR IGNORE INTO sources (source_name, is_isolated) VALUES ('Simulated PMU Stream', 0)")
+        conn.commit()
+        print(f"Database created and initialized in {DB_PATH}")
+    else:
+        conn.executescript(SCHEMA)
+        conn.commit()
+        migrate_database(conn)
+        print(f"Database verified and migrated in {DB_PATH}")
     conn.close()
-    print(f"Tables created in {DB_PATH}")
 
 
 def insert_demo_user(conn):
     cur = conn.cursor()
     cur.execute(
-        "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
+        "INSERT OR IGNORE INTO users (username, password_hash, role) VALUES (?, ?, ?)",
         ("admin", generate_password_hash("admin123"), "admin"),
     )
     cur.execute(
-        "INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)",
+        "INSERT OR IGNORE INTO users (username, password_hash, role) VALUES (?, ?, ?)",
         ("operator", generate_password_hash("operator123"), "user"),
     )
     conn.commit()
@@ -109,8 +183,8 @@ def insert_sample_readings(conn):
                 row_index, timestamp, source,
                 actual_frequency_value, fraction_of_second, time_synchronized,
                 interarrival_time, time_difference,
-                ground_truth_label, manipulated_fields
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ground_truth_label, manipulated_fields, is_quarantined
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 int(row["row_index"]),
@@ -123,6 +197,7 @@ def insert_sample_readings(conn):
                 row["time difference"],
                 row["attack_type"],
                 row["manipulated_fields"] if not str(row["manipulated_fields"]) == "nan" else None,
+                0,
             ),
         )
     conn.commit()
@@ -132,18 +207,22 @@ def insert_sample_readings(conn):
 def insert_sample_incident(conn):
     """Insert example incidents and normal events across all domains."""
     cur = conn.cursor()
+    attack_resp_log = json.dumps(["quarantine", "fallback", "isolate", "increase_monitoring", "alert", "log"])
+    normal_resp_log = json.dumps([])
 
     # 1. IEC 61850 Replay Incident (Medium Risk)
     cur.execute(
         """
         INSERT INTO incidents (
             timestamp, source, attack_type, confidence,
-            risk_score, risk_level, ground_truth_label, manipulated_fields
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            risk_score, risk_level, ground_truth_label, manipulated_fields,
+            source_isolated, response_log
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "sample-load", "Substation Process Bus (IEC 61850 GOOSE)", "Replay", 88.0,
             64.6, "Medium", "Replay", "sqNum, stnum, sqDiff",
+            0, attack_resp_log,
         ),
     )
     replay_id = cur.lastrowid
@@ -162,12 +241,14 @@ def insert_sample_incident(conn):
         """
         INSERT INTO incidents (
             timestamp, source, attack_type, confidence,
-            risk_score, risk_level, ground_truth_label, manipulated_fields
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            risk_score, risk_level, ground_truth_label, manipulated_fields,
+            source_isolated, response_log
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "sample-load", "Substation Process Bus (IEC 61850 GOOSE)", "Fault", 90.0,
             65.2, "Medium", "Fault", "MU1CurrentAngleB, state_cb",
+            0, attack_resp_log,
         ),
     )
     fault_id = cur.lastrowid
@@ -186,12 +267,14 @@ def insert_sample_incident(conn):
         """
         INSERT INTO incidents (
             timestamp, source, attack_type, confidence,
-            risk_score, risk_level, ground_truth_label, manipulated_fields
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            risk_score, risk_level, ground_truth_label, manipulated_fields,
+            source_isolated, response_log
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "sample-load", "Substation Process Bus (IEC 61850 GOOSE)", "Injection", 94.0,
             88.8, "Critical", "Injection", "stnum, state_cb, any_relay",
+            0, attack_resp_log,
         ),
     )
     inj_id = cur.lastrowid
@@ -210,12 +293,14 @@ def insert_sample_incident(conn):
         """
         INSERT INTO incidents (
             timestamp, source, attack_type, confidence,
-            risk_score, risk_level, ground_truth_label, manipulated_fields
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            risk_score, risk_level, ground_truth_label, manipulated_fields,
+            source_isolated, response_log
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "sample-load", "Substation Process Bus (IEC 61850 GOOSE)", "Masquerade", 92.8,
             88.6, "Critical", "Masquerade", "stnum, sqNum, state_cb",
+            0, attack_resp_log,
         ),
     )
     masq_id = cur.lastrowid
@@ -234,12 +319,14 @@ def insert_sample_incident(conn):
         """
         INSERT INTO incidents (
             timestamp, source, attack_type, confidence,
-            risk_score, risk_level, ground_truth_label, manipulated_fields
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            risk_score, risk_level, ground_truth_label, manipulated_fields,
+            source_isolated, response_log
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "sample-load", "PMU Synchrophasor (IEEE C37.118)", "FDI", 97.8,
             89.6, "Critical", "FDI", "Actual frequency value",
+            0, attack_resp_log,
         ),
     )
     fdi_id = cur.lastrowid
@@ -258,12 +345,14 @@ def insert_sample_incident(conn):
         """
         INSERT INTO incidents (
             timestamp, source, attack_type, confidence,
-            risk_score, risk_level, ground_truth_label, manipulated_fields
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            risk_score, risk_level, ground_truth_label, manipulated_fields,
+            source_isolated, response_log
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "sample-load", "PMU Synchrophasor (IEEE C37.118)", "TSA", 99.6,
             99.9, "Critical", "TSA", "time difference, interarrival time",
+            0, attack_resp_log,
         ),
     )
     tsa_id = cur.lastrowid
@@ -282,12 +371,14 @@ def insert_sample_incident(conn):
         """
         INSERT INTO incidents (
             timestamp, source, attack_type, confidence,
-            risk_score, risk_level, ground_truth_label, manipulated_fields
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            risk_score, risk_level, ground_truth_label, manipulated_fields,
+            source_isolated, response_log
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "sample-load", "SCADA Telecontrol (IEC 60870-5-104)", "Telemetry Spoofing", 84.2,
             62.0, "Medium", "Telemetry Spoofing", "asduType, ioa",
+            0, attack_resp_log,
         ),
     )
     spoof_id = cur.lastrowid
@@ -306,12 +397,14 @@ def insert_sample_incident(conn):
         """
         INSERT INTO incidents (
             timestamp, source, attack_type, confidence,
-            risk_score, risk_level, ground_truth_label, manipulated_fields
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            risk_score, risk_level, ground_truth_label, manipulated_fields,
+            source_isolated, response_log
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "sample-load", "Substation Process Bus (IEC 61850 GOOSE)", "Normal", 98.4,
             0.2, "Normal", "Normal", "None (Nominal Substation State)",
+            0, normal_resp_log,
         ),
     )
     norm1_id = cur.lastrowid
@@ -330,12 +423,14 @@ def insert_sample_incident(conn):
         """
         INSERT INTO incidents (
             timestamp, source, attack_type, confidence,
-            risk_score, risk_level, ground_truth_label, manipulated_fields
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            risk_score, risk_level, ground_truth_label, manipulated_fields,
+            source_isolated, response_log
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "sample-load", "PMU Synchrophasor (IEEE C37.118)", "Normal", 99.2,
             0.1, "Normal", "Normal", "None (Nominal Frequency 60.0 Hz)",
+            0, normal_resp_log,
         ),
     )
     norm2_id = cur.lastrowid
@@ -354,12 +449,14 @@ def insert_sample_incident(conn):
         """
         INSERT INTO incidents (
             timestamp, source, attack_type, confidence,
-            risk_score, risk_level, ground_truth_label, manipulated_fields
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            risk_score, risk_level, ground_truth_label, manipulated_fields,
+            source_isolated, response_log
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "sample-load", "SCADA Telecontrol (IEC 60870-5-104)", "Normal", 97.9,
             0.3, "Normal", "Normal", "None (Nominal Telecontrol Polling)",
+            0, normal_resp_log,
         ),
     )
     norm3_id = cur.lastrowid
@@ -378,12 +475,14 @@ def insert_sample_incident(conn):
         """
         INSERT INTO incidents (
             timestamp, source, attack_type, confidence,
-            risk_score, risk_level, ground_truth_label, manipulated_fields
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            risk_score, risk_level, ground_truth_label, manipulated_fields,
+            source_isolated, response_log
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             "sample-load", "Power Transmission Protection (MSU/ORNL)", "Normal", 98.8,
             0.1, "Normal", "Natural", "None (Nominal Power Flow)",
+            0, normal_resp_log,
         ),
     )
     norm4_id = cur.lastrowid
@@ -403,9 +502,4 @@ def insert_sample_incident(conn):
 
 if __name__ == "__main__":
     create_database()
-    conn = sqlite3.connect(DB_PATH)
-    insert_demo_user(conn)
-    insert_sample_readings(conn)
-    insert_sample_incident(conn)
-    conn.close()
     print("\nDatabase setup complete ->", DB_PATH)

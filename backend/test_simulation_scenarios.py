@@ -1,7 +1,7 @@
 """
 test_simulation_scenarios.py
 
-End-to-end verification of GridSentry with newly uploaded simulation datasets:
+End-to-end verification of DeepShieldGrid with newly uploaded simulation datasets:
 1. PMU Simulation Dataset -> routes to FDI_TSA model
 2. IEC-104 SCADA Simulation Dataset -> routes to IEC104 model
 3. Substation GOOSE/SV Simulation Dataset -> routes to IEC61850 model
@@ -26,7 +26,7 @@ SCRATCH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads"
 os.makedirs(SCRATCH_DIR, exist_ok=True)
 
 print("=" * 80)
-print("GRIDSENTRY END-TO-END SIMULATION DATASET UPLOAD TEST SUITE")
+print("DEEPSHIELDGRID END-TO-END SIMULATION DATASET UPLOAD TEST SUITE")
 print("=" * 80)
 
 # ---------------------------------------------------------------------------

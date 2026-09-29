@@ -1,10 +1,10 @@
 """
 server.py
 
-The GridSentry backend server:
+The DeepShieldGrid backend server:
 - Loads the PSO/GWO-optimized Deep Learning (1D-CNN + BiLSTM) models via ModelRegistry
 - Runs simulated real-time stream on background thread
-- Exposes REST API endpoints for the GridSentry frontend
+- Exposes REST API endpoints for the DeepShieldGrid frontend
 - Dynamic Upload & Feature Compatibility Engine for new simulation datasets
 - Real SHAP explanation and Autoencoder Unknown Anomaly Detection
 """
@@ -21,7 +21,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 from fpdf import FPDF
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, request, jsonify, send_file, send_from_directory
 from flask_cors import CORS
 from werkzeug.security import check_password_hash
 from werkzeug.utils import secure_filename
@@ -29,6 +29,7 @@ import shap
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(BASE_DIR)
+FRONTEND_DIR = os.path.abspath(os.path.join(PROJECT_DIR, "frontend"))
 ML_DIR = os.path.join(BASE_DIR, "ml")
 UPLOADS_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOADS_DIR, exist_ok=True)
@@ -41,10 +42,18 @@ if ML_DIR not in sys.path:
 from dataset_utils import load_clean_dataset, MODEL_FEATURES
 from predict import predict_attack, model as rf_model, label_encoder, FEATURES as FDI_FEATURES
 from feature_compatibility import FeatureCompatibilityEngine, ModelExecutor, calculate_cyber_risk
+from init_db import migrate_database
 
 DB_PATH = os.path.join(BASE_DIR, "database.db")
 
-app = Flask(__name__)
+# Auto-migrate database on server load if database exists
+try:
+    with sqlite3.connect(DB_PATH) as _m_conn:
+        migrate_database(_m_conn)
+except Exception as _e:
+    print(f"[Database] Startup migration check: {_e}")
+
+app = Flask(__name__, static_folder=FRONTEND_DIR, static_url_path="")
 CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Global feature compatibility engine
@@ -56,6 +65,21 @@ def add_cors_headers(response):
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization"
     return response
+
+
+@app.route("/")
+def serve_index():
+    return send_from_directory(FRONTEND_DIR, "index.html")
+
+
+@app.route("/<path:path>")
+def serve_static(path):
+    target = os.path.join(FRONTEND_DIR, path)
+    if os.path.exists(target) and os.path.isfile(target):
+        return send_from_directory(FRONTEND_DIR, path)
+    if path.startswith("api/"):
+        return jsonify({"error": f"API endpoint /{path} not found"}), 404
+    return send_from_directory(FRONTEND_DIR, "index.html")
 
 
 # ---------------------------------------------------------------------------
@@ -149,9 +173,19 @@ def compute_shap_values(feature_dict, predicted_class_index):
 # ---------------------------------------------------------------------------
 def create_incident(source, attack_type, confidence, ground_truth_label,
                     manipulated_fields, feature_dict, predicted_class_index,
-                    custom_shap_pairs=None):
+                    custom_shap_pairs=None, response_log=None, source_isolated=0):
     risk_score, risk_level = calculate_risk(attack_type, confidence)
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # Format response_log as JSON string
+    if isinstance(response_log, (list, dict)):
+        response_log_str = json.dumps(response_log)
+    elif response_log is not None:
+        response_log_str = str(response_log)
+    else:
+        response_log_str = None
+
+    source_isolated_val = 1 if source_isolated else 0
 
     conn = get_db()
     cur = conn.cursor()
@@ -159,11 +193,13 @@ def create_incident(source, attack_type, confidence, ground_truth_label,
         """
         INSERT INTO incidents (
             timestamp, source, attack_type, confidence,
-            risk_score, risk_level, ground_truth_label, manipulated_fields
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            risk_score, risk_level, ground_truth_label, manipulated_fields,
+            source_isolated, response_log
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (timestamp, source, attack_type, confidence,
-         risk_score, risk_level, ground_truth_label, manipulated_fields),
+         risk_score, risk_level, ground_truth_label, manipulated_fields,
+         source_isolated_val, response_log_str),
     )
     incident_id = cur.lastrowid
 
@@ -301,12 +337,37 @@ simulation_lock = threading.Lock()
 
 
 def generate_sample_reading(domain_key="FDI_TSA"):
+    # If dataset cache is not yet warm, return instant default sample to avoid cold-start web timeout
+    if domain_key != "UPLOADED" and domain_key not in DOMAIN_DATA_CACHE:
+        cfg = SIMULATION_DOMAINS.get(domain_key, SIMULATION_DOMAINS["FDI_TSA"])
+        return {
+            "row_index": 0,
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source": f"Simulated {cfg['name']}",
+            "domain": cfg["name"],
+            "model_id": cfg["model_id"],
+            "prediction": "Normal",
+            "confidence": 98.5,
+            "ground_truth_label": "Normal",
+            "risk_score": 0.0,
+            "risk_level": "Normal",
+            "features": {},
+            "display_features": [
+                {"name": f, "value": "50.0000" if "freq" in f.lower() else "0.0000", "unit": cfg["units"].get(f, "")}
+                for f in cfg["display_features"]
+            ],
+            "is_quarantined": False,
+            "fallback_reading": None,
+            "source_isolated": False,
+            "monitoring_mode": "normal",
+        }
+
     df = get_domain_dataset(domain_key)
     if df is None or len(df) == 0:
         return {
             "row_index": 0,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "source": "GridSentry Core",
+            "source": "DeepShieldGrid Core",
             "domain": "PMU Synchrophasor",
             "prediction": "Normal",
             "confidence": 98.5,
@@ -314,6 +375,10 @@ def generate_sample_reading(domain_key="FDI_TSA"):
             "risk_level": "Normal",
             "display_features": [],
             "features": {},
+            "is_quarantined": False,
+            "fallback_reading": None,
+            "source_isolated": False,
+            "monitoring_mode": "normal",
         }
     
     if domain_key == "UPLOADED":
@@ -374,12 +439,17 @@ def generate_sample_reading(domain_key="FDI_TSA"):
         "risk_score": result["risk_score"],
         "risk_level": result["risk_level"],
         "incident_id": None,
+        "is_quarantined": False,
+        "fallback_reading": None,
+        "source_isolated": False,
+        "monitoring_mode": "normal",
     }
 
 
 def simulation_loop(interval_seconds):
     conn = get_db()
     cur = conn.cursor()
+    fast_monitoring_rows_remaining = 0
 
     while True:
         with simulation_lock:
@@ -414,6 +484,34 @@ def simulation_loop(interval_seconds):
             units = cfg["units"]
             gt_col = cfg["ground_truth_col"]
 
+        source_name = f"Simulated {domain_name}"
+
+        # Ensure source exists in sources table
+        cur.execute(
+            "INSERT OR IGNORE INTO sources (source_name, is_isolated) VALUES (?, 0)",
+            (source_name,)
+        )
+        conn.commit()
+
+        # Check source isolation status at start of processing each row
+        # If sources.is_isolated = 1 AND current row_index >= isolated_until_row, reset is_isolated back to 0
+        cur.execute(
+            "SELECT is_isolated, isolated_until_row, last_trusted_reading FROM sources WHERE source_name = ?",
+            (source_name,)
+        )
+        src_row = cur.fetchone()
+        source_is_isolated = bool(src_row["is_isolated"]) if src_row and src_row["is_isolated"] else False
+        isolated_until_row = src_row["isolated_until_row"] if src_row else None
+        last_trusted_raw = src_row["last_trusted_reading"] if src_row else None
+
+        if source_is_isolated and isolated_until_row is not None and int(idx) >= int(isolated_until_row):
+            cur.execute(
+                "UPDATE sources SET is_isolated = 0, isolated_until_row = NULL WHERE source_name = ?",
+                (source_name,)
+            )
+            conn.commit()
+            source_is_isolated = False
+
         start_idx = max(0, idx - 4)
         window_df = df.iloc[start_idx : idx + 1]
 
@@ -432,19 +530,72 @@ def simulation_loop(interval_seconds):
         if ground_truth == "nan":
             ground_truth = "—"
 
-        # Log all telemetry events (both Normal baseline and attack detections)
         is_attack = result["prediction"] not in ["Normal", "Natural"]
         manipulated_str = ", ".join(display_feats) if is_attack else "None (Nominal Telemetry)"
 
+        # a) QUARANTINE & b) TRUSTED DATA FALLBACK & c) SOURCE ISOLATION
+        fallback_reading = None
+        if is_attack:
+            is_quarantined = 1
+
+            # b) Look up sources.last_trusted_reading
+            if last_trusted_raw:
+                try:
+                    fallback_reading = json.loads(last_trusted_raw)
+                except Exception:
+                    fallback_reading = None
+
+            # c) Set sources.is_isolated = 1 and isolated_until_row = current row_index + 5
+            isolated_until = int(idx) + 5
+            cur.execute(
+                "UPDATE sources SET is_isolated = 1, isolated_until_row = ? WHERE source_name = ?",
+                (isolated_until, source_name)
+            )
+            conn.commit()
+            source_is_isolated = True
+
+        else:
+            is_quarantined = 0
+            # Update sources table's last_trusted_reading with this row's feature_dict
+            trusted_json = json.dumps(result["latest_features"])
+            cur.execute(
+                "UPDATE sources SET last_trusted_reading = ? WHERE source_name = ?",
+                (trusted_json, source_name)
+            )
+            conn.commit()
+
+        # d) INCREASE MONITORING
+        if is_attack:
+            fast_monitoring_rows_remaining = 5
+
+        if fast_monitoring_rows_remaining > 0:
+            monitoring_mode = "increased"
+            current_sleep = max(0.3, interval_seconds / 2.0)
+            fast_monitoring_rows_remaining -= 1
+        else:
+            monitoring_mode = "normal"
+            current_sleep = interval_seconds
+
+        # e) ALERT GENERATION & INCIDENT LOGGING
+        if is_attack:
+            response_steps = ["quarantine"]
+            if fallback_reading is not None:
+                response_steps.append("fallback")
+            response_steps.extend(["isolate", "increase_monitoring", "alert", "log"])
+        else:
+            response_steps = []
+
         incident_id, risk_score, risk_level = create_incident(
-            source=f"Simulated {domain_name}",
+            source=source_name,
             attack_type=result["prediction"],
             confidence=result["confidence"],
             ground_truth_label=ground_truth,
             manipulated_fields=manipulated_str,
             feature_dict=result["latest_features"],
             predicted_class_index=0,
-            custom_shap_pairs=result.get("shap_values")
+            custom_shap_pairs=result.get("shap_values"),
+            response_log=response_steps,
+            source_isolated=1 if source_is_isolated else 0,
         )
 
         try:
@@ -454,6 +605,36 @@ def simulation_loop(interval_seconds):
             conn.commit()
         except Exception:
             pass
+
+        # f) Readings INSERT with is_quarantined
+        try:
+            cur.execute(
+                """
+                INSERT INTO readings (
+                    row_index, timestamp, source,
+                    actual_frequency_value, fraction_of_second, time_synchronized,
+                    interarrival_time, time_difference,
+                    ground_truth_label, manipulated_fields, is_quarantined
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(idx),
+                    timestamp,
+                    source_name,
+                    float(row["Actual frequency value"]) if "Actual frequency value" in row and pd.notna(row["Actual frequency value"]) else None,
+                    float(row["Fraction of second"]) if "Fraction of second" in row and pd.notna(row["Fraction of second"]) else None,
+                    float(row["Time synchronized"]) if "Time synchronized" in row and pd.notna(row["Time synchronized"]) else None,
+                    float(row["interarrival time"]) if "interarrival time" in row and pd.notna(row["interarrival time"]) else None,
+                    float(row["time difference"]) if "time difference" in row and pd.notna(row["time difference"]) else None,
+                    ground_truth,
+                    manipulated_str,
+                    is_quarantined,
+                ),
+            )
+            cur.execute("DELETE FROM readings WHERE id NOT IN (SELECT id FROM readings ORDER BY id DESC LIMIT 200)")
+            conn.commit()
+        except Exception as e:
+            print("Readings INSERT exception:", e)
 
         display_features = []
         for f in display_feats:
@@ -475,7 +656,7 @@ def simulation_loop(interval_seconds):
         latest = {
             "row_index": int(idx),
             "timestamp": timestamp,
-            "source": f"Simulated {domain_name}",
+            "source": source_name,
             "domain": domain_name,
             "model_id": model_id,
             "features": result["latest_features"],
@@ -487,13 +668,17 @@ def simulation_loop(interval_seconds):
             "risk_score": risk_score,
             "risk_level": risk_level,
             "incident_id": incident_id,
+            "is_quarantined": bool(is_quarantined),
+            "fallback_reading": fallback_reading,
+            "source_isolated": bool(source_is_isolated),
+            "monitoring_mode": monitoring_mode,
         }
 
         with simulation_lock:
             simulation_state["latest_reading"] = latest
             simulation_state["current_index"] = idx + 1
 
-        time.sleep(interval_seconds)
+        time.sleep(current_sleep)
 
     conn.close()
 
@@ -539,10 +724,19 @@ def login():
 def latest_reading():
     with simulation_lock:
         if simulation_state["latest_reading"] is not None:
-            return jsonify(simulation_state["latest_reading"])
+            reading = dict(simulation_state["latest_reading"])
+            reading.setdefault("is_quarantined", False)
+            reading.setdefault("fallback_reading", None)
+            reading.setdefault("source_isolated", False)
+            reading.setdefault("monitoring_mode", "normal")
+            return jsonify(reading)
 
     domain_key = simulation_state.get("active_domain", "FDI_TSA")
     reading = generate_sample_reading(domain_key)
+    reading.setdefault("is_quarantined", False)
+    reading.setdefault("fallback_reading", None)
+    reading.setdefault("source_isolated", False)
+    reading.setdefault("monitoring_mode", "normal")
     with simulation_lock:
         simulation_state["latest_reading"] = reading
     return jsonify(reading)
@@ -556,15 +750,28 @@ def list_incidents():
         "SELECT * FROM incidents ORDER BY id DESC LIMIT ?", (limit,)
     ).fetchall()
     conn.close()
-    return jsonify([dict(r) for r in rows])
+    result = []
+    for r in rows:
+        d = dict(r)
+        raw_resp = d.get("response_log")
+        if raw_resp:
+            try:
+                d["response_log"] = json.loads(raw_resp) if isinstance(raw_resp, str) else list(raw_resp)
+            except Exception:
+                d["response_log"] = []
+        else:
+            d["response_log"] = []
+        d["source_isolated"] = bool(d.get("source_isolated", 0))
+        result.append(d)
+    return jsonify(result)
 
 
 @app.route("/api/incidents/<int:incident_id>", methods=["GET"])
 def get_incident(incident_id):
     conn = get_db()
     row = conn.execute("SELECT * FROM incidents WHERE id = ?", (incident_id,)).fetchone()
-    conn.close()
     if not row:
+        conn.close()
         return jsonify({"error": f"Incident #{incident_id} not found"}), 404
 
     data = dict(row)
@@ -572,6 +779,42 @@ def get_incident(incident_id):
         "Correct" if data["attack_type"] == data["ground_truth_label"]
         else ("Incorrect" if data["ground_truth_label"] else "Unlabeled")
     )
+    raw_resp = data.get("response_log")
+    if raw_resp:
+        try:
+            data["response_log"] = json.loads(raw_resp) if isinstance(raw_resp, str) else list(raw_resp)
+        except Exception:
+            data["response_log"] = []
+    else:
+        data["response_log"] = []
+
+    data["source_isolated"] = bool(data.get("source_isolated", 0))
+
+    # Fetch source details from sources table
+    src_info = conn.execute("SELECT * FROM sources WHERE source_name = ?", (data["source"],)).fetchone()
+    if src_info:
+        data["source_details"] = dict(src_info)
+        if data["source_details"].get("last_trusted_reading"):
+            try:
+                data["source_details"]["last_trusted_reading"] = json.loads(data["source_details"]["last_trusted_reading"])
+            except Exception:
+                pass
+    else:
+        data["source_details"] = None
+
+    # Check reading quarantine record
+    reading_row = conn.execute(
+        "SELECT is_quarantined, actual_frequency_value, fraction_of_second, time_synchronized, interarrival_time, time_difference FROM readings WHERE timestamp = ? OR source = ? ORDER BY id DESC LIMIT 1",
+        (data["timestamp"], data["source"])
+    ).fetchone()
+    if reading_row:
+        data["reading_quarantined"] = bool(reading_row["is_quarantined"])
+        data["raw_reading_snapshot"] = dict(reading_row)
+    else:
+        data["reading_quarantined"] = bool(data.get("attack_type") not in ["Normal", "Natural"])
+        data["raw_reading_snapshot"] = None
+
+    conn.close()
     return jsonify(data)
 
 
@@ -655,7 +898,7 @@ def download_incident_report(incident_id):
             self.set_fill_color(*teal)
             self.set_text_color(*white)
             self.set_font("Helvetica", "B", 14)
-            self.cell(content_width, 14, "GRIDSENTRY INCIDENT REPORT", align="C", fill=True)
+            self.cell(content_width, 14, "DEEPSHIELDGRID INCIDENT REPORT", align="C", fill=True)
             self.set_fill_color(*navy)
             self.rect(0, 27, self.w, 3, "F")
 
@@ -684,7 +927,7 @@ def download_incident_report(incident_id):
             self.multi_cell(
                 0,
                 4,
-                "This report reflects a simulated detection from the GridSentry "
+                "This report reflects a simulated detection from the DeepShieldGrid "
                 "prototype. No real grid control action was performed.",
                 align="C",
                 new_x="LMARGIN",
@@ -801,7 +1044,7 @@ def download_incident_report(incident_id):
         pdf_output,
         mimetype="application/pdf",
         as_attachment=True,
-        download_name=f"gridsentry_incident_{incident_id}.pdf",
+        download_name=f"deepshieldgrid_incident_{incident_id}.pdf",
     )
 
 
@@ -962,7 +1205,7 @@ def set_simulation_domain():
 
 @app.route("/api/models", methods=["GET"])
 def get_registered_models():
-    """Returns all independent trained models in the GridSentry Model Registry."""
+    """Returns all independent trained models in the DeepShieldGrid Model Registry."""
     registry = compatibility_engine.registry
     return jsonify({
         "status": "success",

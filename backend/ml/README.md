@@ -1,4 +1,4 @@
-# GridSentry Machine Learning & Deep Learning System
+# DeepShieldGrid Machine Learning & Deep Learning System
 
 ## Models Implemented
 

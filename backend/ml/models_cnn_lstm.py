@@ -1,7 +1,7 @@
 """
 models_cnn_lstm.py
 
-Deep Learning Neural Architectures for GridSentry:
+Deep Learning Neural Architectures for DeepShieldGrid:
 1. HybridCNNLSTM: 1D-CNN + Bidirectional LSTM classifier for temporal grid attacks.
 2. GridAutoencoder: Deep Autoencoder for unsupervised unknown anomaly detection.
 """

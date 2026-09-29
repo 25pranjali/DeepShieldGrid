@@ -1,6 +1,6 @@
-# GridSentry — Multi-Domain AI-Based Smart Grid Cybersecurity Intrusion Detection System
+# DeepShieldGrid — Multi-Domain AI-Based Smart Grid Cybersecurity Intrusion Detection System
 
-**GridSentry** is an industrial-grade, AI-driven cybersecurity intrusion detection and threat mitigation platform designed for modern electrical smart grids. It monitors real-time and simulated telemetry across multiple critical power grid domains, optimizes sensor and protocol feature selection via meta-heuristic swarm algorithms (**PSO** and **GWO**), performs high-speed deep sequence classification (**1D-CNN + BiLSTM**), flags unknown/zero-day anomalies via unsupervised deep autoencoders, computes genuine local feature attributions via **SHAP (TreeExplainer)**, and assesses cyber risk scores for grid security operators.
+**DeepShieldGrid** is an industrial-grade, AI-driven cybersecurity intrusion detection and threat mitigation platform designed for modern electrical smart grids. It monitors real-time and simulated telemetry across multiple critical power grid domains, optimizes sensor and protocol feature selection via meta-heuristic swarm algorithms (**PSO** and **GWO**), performs high-speed deep sequence classification (**1D-CNN + BiLSTM**), flags unknown/zero-day anomalies via unsupervised deep autoencoders, computes genuine local feature attributions via **SHAP (TreeExplainer)**, and assesses cyber risk scores for grid security operators.
 
 ---
 
@@ -20,14 +20,14 @@ Modern power grids are complex, multi-tiered cyber-physical systems consisting o
 When a user uploads a new simulation or test dataset to the backend:
 1. **Semantic Feature Alias Mapping**: Resolves vendor-specific and protocol-specific column variants to canonical smart-grid features (`backend/feature_mapping.json`).
 2. **Multi-Model Compatibility Evaluation**: Assesses the uploaded dataset against all registered domain models in `models/model_registry.json`.
-3. **Strict Missing Feature Rejection**: If an uploaded dataset lacks the minimum operational features of any model, it is **strictly rejected** (HTTP 422). GridSentry **NEVER fabricates or hallucinates synthetic features**.
+3. **Strict Missing Feature Rejection**: If an uploaded dataset lacks the minimum operational features of any model, it is **strictly rejected** (HTTP 422). DeepShieldGrid **NEVER fabricates or hallucinates synthetic features**.
 4. **Automated Pipeline Execution**: Preprocesses the matched features, generates temporal sliding sequences, executes the hybrid 1D-CNN + BiLSTM model, performs Autoencoder zero-day anomaly checks, computes cyber risk scores, calculates real SHAP feature attributions, logs incidents to the SQLite database, and streams real-time readings to the dashboard.
 
 ---
 
 ## 2. Machine Learning & Optimization Pipeline
 
-For each independent domain, GridSentry applies a rigorous 4-stage pipeline:
+For each independent domain, DeepShieldGrid applies a rigorous 4-stage pipeline:
 
 ```
 [Raw Domain Dataset]
@@ -113,7 +113,7 @@ DeepShieldGrid/
 │   ├── database.db                         <- SQLite database storing incidents & readings
 │   └── requirements.txt                    <- Python dependencies
 ├── frontend/
-│   ├── index.html                          <- GridSentry Web Dashboard UI (Untouched visual layout)
+│   ├── index.html                          <- DeepShieldGrid Web Dashboard UI (Untouched visual layout)
 │   ├── css/
 │   │   └── style.css                       <- Dark cyber-defense styling and responsive design
 │   └── js/
@@ -191,7 +191,7 @@ Default login credentials:
 
 ## 7. Cyber Risk Scoring Matrix
 
-GridSentry quantifies physical and cyber impacts into a standardized risk index (0–100):
+DeepShieldGrid quantifies physical and cyber impacts into a standardized risk index (0–100):
 ```
 For "Normal" classification:
     Risk Score = (1.0 - Confidence) * 30.0

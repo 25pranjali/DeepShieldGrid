@@ -1,7 +1,7 @@
 """
 feature_compatibility.py
 
-Feature Compatibility and Dynamic Model Selection Engine for GridSentry:
+Feature Compatibility and Dynamic Model Selection Engine for DeepShieldGrid:
 - Analyzes uploaded simulation/test datasets
 - Resolves verified semantic aliases using feature_mapping.json
 - Evaluates feature overlap and minimum required features against all models in model_registry.json

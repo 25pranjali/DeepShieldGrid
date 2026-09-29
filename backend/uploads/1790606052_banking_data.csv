@@ -1,0 +1,4 @@
+customer_id,account_balance,transaction_type
+101,5000.0,deposit
+102,12500.5,withdrawal
+103,300.0,transfer
